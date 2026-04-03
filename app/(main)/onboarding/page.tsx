@@ -166,6 +166,23 @@ export default function OnboardingPage() {
           role: "member",
         });
 
+        // Auto-add new member to all public channels in the workspace
+        const { data: publicChannels } = await supabase
+          .from("channels")
+          .select("id")
+          .eq("workspace_id", workspace.id)
+          .eq("is_private", false);
+
+        if (publicChannels && publicChannels.length > 0) {
+          await supabase.from("channel_members").insert(
+            publicChannels.map(ch => ({
+              channel_id: ch.id,
+              user_id: user.id,
+            }))
+          );
+        }
+
+
         // Find the Lobby channel
         const { data: lobbyChannel } = await supabase
           .from("channels")
@@ -238,6 +255,12 @@ export default function OnboardingPage() {
 
       // Post welcome message in Lobby
       if (lobbyChannel) {
+        // Add creator to lobby channel_members
+        await supabase.from("channel_members").insert({
+          channel_id: lobbyChannel.id,
+          user_id: user.id,
+        });
+
         await supabase.from("messages").insert({
           channel_id: lobbyChannel.id,
           sender_id: user.id,
@@ -246,6 +269,7 @@ export default function OnboardingPage() {
           is_system: true,
         });
       }
+
 
       setLoading(false);
       router.push(`/workspace/${newWorkspace.id}`);
