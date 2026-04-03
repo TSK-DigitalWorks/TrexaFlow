@@ -3,19 +3,22 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
-  MessageSquare, Hash, Plus, ChevronDown, LogOut,
-  Send, Smile, Paperclip, Search, Bell, Settings,
+  MessageSquare, Hash, Globe, Plus, ChevronDown, LogOut,
+  Send, Paperclip, Search, Settings,
   Users, Lock, X, Check, Loader2, MoreHorizontal,
-  Pin, User, Copy
+  Pin, User, Copy, Sun, Moon, Monitor
 } from "lucide-react";
+
 import { supabase } from "@/lib/supabase";
 import { useRequireAuth } from "@/lib/useAuth";
 
 type Profile = { id: string; full_name: string; job_title: string; avatar_url: string; email: string };
 type Workspace = { id: string; name: string; description: string; image_url: string; workspace_code: string; owner_id: string };
 type Channel = { id: string; name: string; is_private: boolean; is_default: boolean };
-type Message = { id: string; content: string; created_at: string; sender_id: string; is_pinned: boolean; is_system?: boolean; sender?: Profile };
+type Message = { id: string; channel_id: string; content: string; created_at: string; sender_id: string; is_pinned: boolean; is_system?: boolean; sender?: Profile };
 type Member = { user_id: string; role: string; profile?: Profile; is_online?: boolean };
+type ThemeMode = "system" | "dark" | "light";
+
 
 export default function WorkspacePage() {
   const { checking } = useRequireAuth();  // ← add this line
@@ -56,14 +59,67 @@ export default function WorkspacePage() {
   const [channelMembers, setChannelMembers] = useState<Member[]>([]);
   const [nonChannelMembers, setNonChannelMembers] = useState<Member[]>([]);
   const [channelSettingsTab, setChannelSettingsTab] = useState<"about" | "members">("about");
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [lastReadMap, setLastReadMap] = useState<Record<string, string>>({});
+  const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
+  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
+  const [showThemePicker, setShowThemePicker] = useState(false);
+
+
+
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const activeChannelRef = useRef<Channel | null>(null);
+  const presenceChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const themePickerRef = useRef<HTMLDivElement>(null);
 
-  // ── Boot ──
+
+
+
   useEffect(() => {
     init();
   }, [workspaceId]);
+
+  useEffect(() => {
+    if (activeChannel) loadChannelMembers();
+  }, [activeChannel]);
+
+  useEffect(() => {
+    activeChannelRef.current = activeChannel;
+    if (activeChannel) markChannelAsRead(activeChannel.id);
+  }, [activeChannel]);
+
+  useEffect(() => {
+    return () => {
+      if (presenceChannelRef.current) {
+        presenceChannelRef.current.untrack();
+        supabase.removeChannel(presenceChannelRef.current);
+      }
+    };
+  }, []);
+
+  // ── Theme init ──
+  useEffect(() => {
+    const saved = (localStorage.getItem("trexaflow_theme") as ThemeMode) || "dark";
+    setThemeMode(saved);
+    applyTheme(saved);
+  }, []);
+
+  // ── Close picker on outside click ──
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (themePickerRef.current && !themePickerRef.current.contains(e.target as Node)) {
+        setShowThemePicker(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+
+
+
 
   const init = async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -99,14 +155,84 @@ export default function WorkspacePage() {
     const { data: ws } = await supabase.from("workspaces").select("*").eq("id", workspaceId).single();
     setWorkspace(ws);
 
-    const { data: chans } = await supabase.from("channels").select("*").eq("workspace_id", workspaceId).order("is_default", { ascending: false }).order("created_at");
-    setChannels(chans || []);
+    // Fetch all public channels + private channels where user is a member
+    const { data: publicChans } = await supabase
+      .from("channels")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("is_private", false)
+      .order("is_default", { ascending: false })
+      .order("created_at");
 
-    const lobby = chans?.find((c: Channel) => c.is_default) || chans?.[0];
-    if (lobby) setActiveChannel(lobby);
+    const { data: privateMemberships } = await supabase
+      .from("channel_members")
+      .select("channel_id")
+      .eq("user_id", user.id);
+
+    const privateChannelIds = privateMemberships?.map(m => m.channel_id) || [];
+
+    let privateChans: Channel[] = [];
+    if (privateChannelIds.length > 0) {
+      const { data } = await supabase
+        .from("channels")
+        .select("*")
+        .eq("workspace_id", workspaceId)
+        .eq("is_private", true)
+        .in("id", privateChannelIds)
+        .order("created_at");
+      privateChans = data || [];
+    }
+
+    const chans = [
+      ...(publicChans || []).sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0)),
+      ...privateChans,
+    ];
+    setChannels(chans || []);
+    await fetchUnreadCounts(chans || []);
 
     await loadMembers();
+
+    const lobby = chans?.find((c: Channel) => c.is_default) || chans?.[0];
+    if (lobby) {
+      setActiveChannel(lobby);
+      markChannelAsRead(lobby.id);
+    }
+
     setLoading(false);
+
+    // ── Realtime Presence ──
+    const presenceChannel = supabase.channel(`presence:${workspaceId}`, {
+      config: { presence: { key: user.id } },
+    });
+
+    presenceChannel
+      .on("presence", { event: "sync" }, () => {
+        const state = presenceChannel.presenceState();
+        const online = new Set(Object.keys(state));
+        setOnlineUsers(online);
+      })
+      .on("presence", { event: "join" }, ({ key }) => {
+        setOnlineUsers(prev => new Set([...prev, key]));
+      })
+      .on("presence", { event: "leave" }, ({ key }) => {
+        setOnlineUsers(prev => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      })
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          await presenceChannel.track({
+            user_id: user.id,
+            full_name: profile?.full_name,
+            online_at: new Date().toISOString(),
+          });
+        }
+      });
+
+    // Store ref so we can untrack on unmount
+    presenceChannelRef.current = presenceChannel;
   };
 
   const loadMembers = async () => {
@@ -137,17 +263,33 @@ export default function WorkspacePage() {
     if (!activeChannel) return;
     loadMessages(activeChannel.id);
 
-    const sub = supabase.channel(`messages:${activeChannel.id}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `channel_id=eq.${activeChannel.id}` },
+    const sub = supabase.channel(`messages-realtime`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" },
         async (payload) => {
-          const { data: sender } = await supabase.from("users").select("*").eq("id", payload.new.sender_id).single();
-          setMessages(prev => [...prev, { ...payload.new as Message, sender }]);
-          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+          const msg = payload.new as Message;
+          if (msg.channel_id === activeChannelRef.current?.id) {
+            // Currently viewing this channel — just append and mark read
+            const { data: sender } = await supabase.from("users").select("*").eq("id", msg.sender_id).single();
+            setMessages(prev => [...prev, { ...msg, sender }]);
+            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+            markChannelAsRead(msg.channel_id);
+          } else {
+            // Different channel — increment unread badge
+            if (!msg.is_system) {
+              setUnreadCounts(prev => ({
+                ...prev,
+                [msg.channel_id]: (prev[msg.channel_id] || 0) + 1,
+              }));
+            }
+          }
         })
       .subscribe();
 
-    return () => { supabase.removeChannel(sub); };
+    return () => {
+      supabase.removeChannel(sub);
+    };
   }, [activeChannel]);
+
 
   const loadMessages = async (channelId: string) => {
     const { data } = await supabase.from("messages").select("*").eq("channel_id", channelId).order("created_at");
@@ -166,22 +308,49 @@ export default function WorkspacePage() {
   const createChannel = async () => {
     if (!newChannelName.trim() || !me) return;
     setCreatingChannel(true);
-    const { data } = await supabase.from("channels").insert({
-      workspace_id: workspaceId,
-      name: newChannelName.trim().toLowerCase().replace(/\s+/g, "-"),
-      description: newChannelDesc.trim() || null,
-      is_private: newChannelPrivate,
-      is_default: false,
-      created_by: me.id,
-    }).select().single();
-    if (data) {
-      setChannels(prev => [...prev, data]);
-      setActiveChannel(data);
+
+    const { data: newChannel, error } = await supabase
+      .from("channels")
+      .insert({
+        workspace_id: workspaceId,
+        name: newChannelName.trim().toLowerCase().replace(/\s+/g, "-"),
+        description: newChannelDesc.trim() || null,
+        is_private: newChannelPrivate,
+        is_default: false,
+        created_by: me.id,
+      })
+      .select()
+      .single();
+
+    if (error || !newChannel) {
+      setCreatingChannel(false);
+      return;
     }
-    setNewChannelName(""); setNewChannelDesc(""); setNewChannelPrivate(false);
+
+    if (newChannelPrivate) {
+      // Private channel — only add the creator
+      await supabase.from("channel_members").insert({
+        channel_id: newChannel.id,
+        user_id: me.id,
+      });
+    } else {
+      // Public channel — auto-add ALL workspace members
+      const insertAll = members.map(m => ({
+        channel_id: newChannel.id,
+        user_id: m.user_id,
+      }));
+      await supabase.from("channel_members").insert(insertAll);
+    }
+
+    setChannels(prev => [...prev, newChannel]);
+    setActiveChannel(newChannel);
+    setNewChannelName("");
+    setNewChannelDesc("");
+    setNewChannelPrivate(false);
     setShowCreateChannel(false);
     setCreatingChannel(false);
   };
+
 
   // ── Open channel settings ──
   const openChannelSettings = async () => {
@@ -259,6 +428,9 @@ export default function WorkspacePage() {
     router.push("/");
   };
 
+
+
+
   // ── Send message ──
   const sendMessage = async () => {
     const content = newMessage.trim();
@@ -300,16 +472,112 @@ export default function WorkspacePage() {
 
   const getInitials = (name: string) => name?.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2) || "?";
 
+  const applyTheme = (mode: ThemeMode) => {
+    // Set on <html> for global CSS (body background, scrollbar, etc.)
+    const root = document.documentElement;
+    if (mode === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", mode);
+    }
+    localStorage.setItem("trexaflow_theme", mode);
+  };
+
+
+  const handleThemeChange = (mode: ThemeMode) => {
+    setThemeMode(mode);
+    applyTheme(mode);
+    setShowThemePicker(false);
+  };
+
+
+  // ── Mark channel as read ──
+  const markChannelAsRead = (channelId: string) => {
+    const now = new Date().toISOString();
+    setLastReadMap(prev => ({ ...prev, [channelId]: now }));
+    setUnreadCounts(prev => ({ ...prev, [channelId]: 0 }));
+    // Persist in localStorage so it survives refresh
+    if (typeof window !== "undefined") {
+      const stored = JSON.parse(localStorage.getItem("trexaflow_lastread") || "{}");
+      stored[channelId] = now;
+      localStorage.setItem("trexaflow_lastread", JSON.stringify(stored));
+    }
+  };
+
+  // ── Load last-read timestamps from localStorage ──
+  const loadLastReadMap = (): Record<string, string> => {
+    if (typeof window === "undefined") return {};
+    return JSON.parse(localStorage.getItem("trexaflow_lastread") || "{}");
+  };
+
+  // ── Fetch unread counts for all visible channels ──
+  const fetchUnreadCounts = async (channelList: Channel[]) => {
+    const stored = loadLastReadMap();
+    setLastReadMap(stored);
+
+    const counts: Record<string, number> = {};
+
+    await Promise.all(
+      channelList.map(async (ch) => {
+        const lastRead = stored[ch.id];
+        if (!lastRead) {
+          // Never opened — count all messages
+          const { count } = await supabase
+            .from("messages")
+            .select("id", { count: "exact", head: true })
+            .eq("channel_id", ch.id)
+            .eq("is_system", false);
+          counts[ch.id] = count || 0;
+        } else {
+          const { count } = await supabase
+            .from("messages")
+            .select("id", { count: "exact", head: true })
+            .eq("channel_id", ch.id)
+            .eq("is_system", false)
+            .gt("created_at", lastRead);
+          counts[ch.id] = count || 0;
+        }
+      })
+    );
+
+    setUnreadCounts(counts);
+  };
+
+
   const Avatar = ({ profile, size = 32 }: { profile?: Profile | null; size?: number }) => (
     profile?.avatar_url
       ? <img src={profile.avatar_url} style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} alt="" />
-      : <div style={{ width: size, height: size, borderRadius: "50%", backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.35, fontWeight: 700, color: "#fff", flexShrink: 0 }}>
+      : <div style={{ width: size, height: size, borderRadius: "50%", backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.35, fontWeight: 700, color: "#ffffff", flexShrink: 0 }}>
           {getInitials(profile?.full_name || "?")}
         </div>
   );
 
+  const PresenceDot = ({
+    userId,
+    size = 9,
+    borderColor = "#13161a",
+  }: {
+    userId: string;
+    size?: number;
+    borderColor?: string;
+  }) => {
+    const isOnline = onlineUsers.has(userId);
+    return (
+      <div style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        backgroundColor: isOnline ? "#4ade80" : "var(--text-muted)",
+        border: `2px solid ${borderColor}`,
+        transition: "background-color 0.4s ease",
+        flexShrink: 0,
+      }} />
+    );
+  };
+
+
   if (loading || checking) return (
-    <div style={{ minHeight: "100vh", backgroundColor: "#0f1114", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <Loader2 size={28} color="#E01E5A" className="animate-spin" />
     </div>
   );
@@ -322,158 +590,228 @@ export default function WorkspacePage() {
     const parts = content.split(/\*\*(.*?)\*\*/g);
     return parts.map((part, i) =>
       i % 2 === 1
-        ? <strong key={i} style={{ color: "#fff", fontWeight: 600 }}>{part}</strong>
+        ? <strong key={i} style={{ color: "var(--text-primary)", fontWeight: 600 }}>{part}</strong>
         : part
     );
   };
 
   // ─────────────────────────────────────────
   return (
-    <div style={{ display: "flex", height: "100vh", backgroundColor: "#0f1114", color: "#fff", fontFamily: "var(--font-geist-sans), -apple-system, sans-serif", overflow: "hidden" }}>
+    <div
+      data-theme={themeMode === "system" ? undefined : themeMode}
+      style={{
+        display: "flex", height: "100vh",
+        backgroundColor: "var(--bg-primary)",
+        color: "var(--text-primary)",
+        fontFamily: "var(--font-geist-sans), -apple-system, sans-serif",
+      }}
+    >
 
-      {/* ══════════════════ SIDEBAR ══════════════════ */}
-      <div style={{ width: 240, flexShrink: 0, backgroundColor: "#13161a", borderRight: "1px solid rgba(255,255,255,0.06)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
+
+      {/* ── Sidebar ── */}
+      <div style={{
+        width: 240, flexShrink: 0, display: "flex", flexDirection: "column",
+        backgroundColor: "var(--bg-sidebar)",
+        borderRight: "1px solid var(--border-color)",
+        height: "100vh", overflowY: "auto",
+      }}>
         {/* Workspace header */}
-        <div style={{ padding: "12px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-          <div
-            onClick={() => setShowWorkspaceInfo(true)}
-            style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", padding: "8px", borderRadius: "10px", transition: "background 0.15s" }}
-            onMouseEnter={e => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.05)")}
-            onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
+        <div style={{
+          padding: "0 14px", height: 56, display: "flex", alignItems: "center",
+          justifyContent: "space-between", flexShrink: 0,
+          borderBottom: "1px solid var(--border-color)",
+        }}>
+          <button onClick={() => setShowWorkspaceInfo(true)} style={{
+            background: "none", border: "none", cursor: "pointer",
+            display: "flex", alignItems: "center", gap: "8px",
+            color: "var(--text-primary)", fontWeight: 700, fontSize: "0.95rem",
+            padding: "4px 6px", borderRadius: "7px", flex: 1, textAlign: "left",
+          }}
+            onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
+            onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
           >
             {workspace?.image_url
-              ? <img src={workspace.image_url} style={{ width: 34, height: 34, borderRadius: 9, objectFit: "cover", flexShrink: 0 }} alt="" />
-              : <div style={{ width: 34, height: 34, borderRadius: 9, backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <MessageSquare size={16} color="#fff" />
+              ? <img src={workspace.image_url} style={{ width: 24, height: 24, borderRadius: 6, objectFit: "cover" }} alt="" />
+              : <div style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.7rem", fontWeight: 700, color: "#fff", flexShrink: 0 }}>
+                  {workspace?.name?.[0]?.toUpperCase()}
                 </div>
             }
-            <div style={{ flex: 1, overflow: "hidden" }}>
-              <div style={{ fontWeight: 700, fontSize: "0.88rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{workspace?.name}</div>
-              <div style={{ fontSize: "0.68rem", color: "rgba(255,255,255,0.3)", marginTop: "1px" }}>Click to view details</div>
-            </div>
-            <ChevronDown size={14} color="rgba(255,255,255,0.3)" style={{ flexShrink: 0 }} />
-          </div>
-        </div>
-
-        {/* Search */}
-        <div style={{ padding: "10px 12px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", backgroundColor: "rgba(255,255,255,0.05)", borderRadius: "8px", padding: "7px 10px", cursor: "pointer" }}>
-            <Search size={13} color="rgba(255,255,255,0.3)" />
-            <span style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.3)" }}>Search</span>
-          </div>
-        </div>
-
-        {/* Channels */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
-          <div style={{ padding: "6px 16px 4px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Channels</span>
-            <button onClick={() => setShowCreateChannel(true)} style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.35)", display: "flex", padding: "2px" }}
-              onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-              onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.35)")}
-            >
-              <Plus size={14} />
-            </button>
-          </div>
-
-          {channels.map(ch => (
-            <button key={ch.id} onClick={() => setActiveChannel(ch)} style={{
-              width: "calc(100% - 12px)", display: "flex", alignItems: "center", gap: "7px",
-              padding: "6px 16px", border: "none", cursor: "pointer", textAlign: "left",
-              backgroundColor: activeChannel?.id === ch.id ? "rgba(224,30,90,0.12)" : "transparent",
-              color: activeChannel?.id === ch.id ? "#fff" : "rgba(255,255,255,0.5)",
-              borderRadius: "6px", margin: "1px 6px",
-              transition: "all 0.15s",
-            }}
-              onMouseEnter={e => { if (activeChannel?.id !== ch.id) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.04)"; e.currentTarget.style.color = "#fff"; }}
-              onMouseLeave={e => { if (activeChannel?.id !== ch.id) { e.currentTarget.style.backgroundColor = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.5)"; } }}
-            >
-              {ch.is_private ? <Lock size={13} /> : <Hash size={13} />}
-              <span style={{ fontSize: "0.875rem", fontWeight: activeChannel?.id === ch.id ? 600 : 400 }}>{ch.name}</span>
-            </button>
-          ))}
-
-          {/* DMs section */}
-          <div style={{ marginTop: "8px" }}>
-            <div style={{ padding: "6px 16px 4px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                Direct Messages
-              </span>
-            </div>
-            {members.filter(m => m.user_id !== me?.id).length === 0 && (
-              <p style={{ fontSize: "0.78rem", color: "rgba(255,255,255,0.2)", padding: "4px 16px" }}>
-                No other members yet.
-              </p>
-            )}
-            {members.filter(m => m.user_id !== me?.id).map(m => (
-              <button
-                key={m.user_id}
-                onClick={() => router.push(`/dm/${m.user_id}?from=${workspaceId}`)}
-                style={{
-                  width: "calc(100% - 12px)", display: "flex", alignItems: "center", gap: "8px",
-                  padding: "6px 10px", border: "none", cursor: "pointer", textAlign: "left",
-                  backgroundColor: "transparent", color: "rgba(255,255,255,0.5)",
-                  borderRadius: "6px", margin: "1px 6px", transition: "all 0.15s",
-                }}
-                onMouseEnter={e => { e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.05)"; e.currentTarget.style.color = "#fff"; }}
-                onMouseLeave={e => { e.currentTarget.style.backgroundColor = "transparent"; e.currentTarget.style.color = "rgba(255,255,255,0.5)"; }}
-              >
-                <div style={{ position: "relative", flexShrink: 0 }}>
-                  <Avatar profile={m.profile} size={24} />
-                  <div style={{
-                    position: "absolute", bottom: -1, right: -1,
-                    width: 8, height: 8, borderRadius: "50%",
-                    backgroundColor: "#4ade80",
-                    border: "1.5px solid #13161a",
-                  }} />
-                </div>
-                <span style={{ fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {m.profile?.full_name}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* My profile strip */}
-        <div style={{ padding: "10px 12px", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: "9px" }}>
-          <div style={{ position: "relative" }}>
-            <Avatar profile={me} size={30} />
-            <div style={{ position: "absolute", bottom: 0, right: 0, width: 9, height: 9, borderRadius: "50%", backgroundColor: "#4ade80", border: "2px solid #13161a" }} />
-          </div>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <div style={{ fontSize: "0.82rem", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{me?.full_name}</div>
-            <div style={{ fontSize: "0.7rem", color: "rgba(255,255,255,0.35)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{me?.job_title}</div>
-          </div>
-          <button onClick={signOut} title="Sign out" style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "4px" }}
-            onMouseEnter={e => (e.currentTarget.style.color = "#f87171")}
-            onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.3)")}
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {workspace?.name}
+            </span>
+          </button>
+          <button onClick={signOut} title="Sign out" style={{
+            background: "none", border: "none", cursor: "pointer",
+            color: "var(--icon-color)", padding: "6px", borderRadius: "6px",
+          }}
+            onMouseEnter={e => (e.currentTarget.style.color = "var(--icon-hover)")}
+            onMouseLeave={e => (e.currentTarget.style.color = "var(--icon-color)")}
           >
             <LogOut size={15} />
           </button>
         </div>
+
+        {/* Channels section */}
+        <div style={{ marginTop: "6px" }}>
+          <div style={{ padding: "6px 16px 4px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              Channels
+            </span>
+            <button onClick={() => setShowCreateChannel(true)} title="New channel" style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "var(--icon-color)", padding: "2px", borderRadius: "4px",
+            }}
+              onMouseEnter={e => (e.currentTarget.style.color = "var(--icon-hover)")}
+              onMouseLeave={e => (e.currentTarget.style.color = "var(--icon-color)")}
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+
+          {channels.map(ch => (
+            <button key={ch.id}
+              onClick={() => { setActiveChannel(ch); markChannelAsRead(ch.id); }}
+              style={{
+                width: "calc(100% - 12px)", display: "flex", alignItems: "center", gap: "6px",
+                padding: "6px 10px", border: "none", cursor: "pointer",
+                backgroundColor: activeChannel?.id === ch.id ? "var(--bg-active)" : "transparent",
+                color: activeChannel?.id === ch.id ? "var(--text-primary)" : "var(--text-secondary)",
+                borderRadius: "6px", margin: "1px 6px", textAlign: "left", transition: "all 0.15s",
+              }}
+              onMouseEnter={e => {
+                if (activeChannel?.id !== ch.id) {
+                  e.currentTarget.style.backgroundColor = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text-primary)";
+                }
+              }}
+              onMouseLeave={e => {
+                if (activeChannel?.id !== ch.id) {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color = "var(--text-secondary)";
+                }
+              }}
+            >
+              {ch.is_private
+                ? <Lock size={13} style={{ flexShrink: 0 }} />
+                : <Globe size={13} style={{ flexShrink: 0 }} />
+              }
+              <span style={{
+                flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                fontSize: "0.875rem",
+                fontWeight: unreadCounts[ch.id] > 0 ? 700 : 400,
+              }}>
+                {ch.name}
+              </span>
+              {unreadCounts[ch.id] > 0 && activeChannel?.id !== ch.id && (
+                <div style={{
+                  minWidth: 18, height: 18, borderRadius: 999,
+                  backgroundColor: "#E01E5A", color: "#fff",
+                  fontSize: "0.68rem", fontWeight: 700,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  padding: "0 5px", flexShrink: 0,
+                }}>
+                  {unreadCounts[ch.id] > 99 ? "99+" : unreadCounts[ch.id]}
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* DMs section */}
+        <div style={{ marginTop: "16px" }}>
+          <div style={{ padding: "6px 16px 4px" }}>
+            <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              Direct Messages
+            </span>
+          </div>
+          {members.filter(m => m.user_id !== me?.id).map(m => (
+            <button key={m.user_id}
+              onClick={() => router.push(`/dm/${m.user_id}?from=${workspaceId}`)}
+              style={{
+                width: "calc(100% - 12px)", display: "flex", alignItems: "center", gap: "8px",
+                padding: "6px 10px", border: "none", cursor: "pointer",
+                backgroundColor: "transparent", color: "var(--text-secondary)",
+                borderRadius: "6px", margin: "1px 6px", transition: "all 0.15s",
+              }}
+              onMouseEnter={e => { e.currentTarget.style.backgroundColor = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-primary)"; }}
+              onMouseLeave={e => { e.currentTarget.style.backgroundColor = "transparent"; e.currentTarget.style.color = "var(--text-secondary)"; }}
+            >
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <Avatar profile={m.profile} size={24} />
+                <div style={{ position: "absolute", bottom: -1, right: -1 }}>
+                  <PresenceDot userId={m.user_id} size={9} borderColor="var(--bg-sidebar)" />
+                </div>
+              </div>
+              <span style={{
+                fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                fontWeight: onlineUsers.has(m.user_id) ? 600 : 400,
+              }}>
+                {m.profile?.full_name}
+              </span>
+              {onlineUsers.has(m.user_id) && (
+                <span style={{ fontSize: "0.65rem", color: "var(--unread-dot)", marginLeft: "auto", fontWeight: 500, flexShrink: 0 }}>
+                  online
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* Bottom — My profile */}
+        <div style={{ marginTop: "auto", padding: "12px 10px", borderTop: "1px solid var(--border-color)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 8px", borderRadius: "8px" }}>
+            <div style={{ position: "relative" }}>
+              <Avatar profile={me} size={30} />
+              <div style={{ position: "absolute", bottom: 0, right: 0 }}>
+                <PresenceDot userId={me?.id || ""} size={9} borderColor="var(--bg-sidebar)" />
+              </div>
+            </div>
+            <div style={{ flex: 1, overflow: "hidden" }}>
+              <div style={{ fontSize: "0.82rem", fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {me?.full_name}
+              </div>
+              <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {me?.job_title}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
+
 
       {/* ══════════════════ MAIN AREA ══════════════════ */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
         {/* Channel top bar */}
-        <div style={{ height: 56, borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px", flexShrink: 0 }}>
+        <div style={{
+          height: 56, borderBottom: "1px solid var(--border-color)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 20px", flexShrink: 0,
+          backgroundColor: "var(--bg-topbar)",
+        }}>
+          {/* Left side */}
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            {activeChannel?.is_private ? <Lock size={16} color="rgba(255,255,255,0.5)" /> : <Hash size={16} color="rgba(255,255,255,0.5)" />}
-            <button
-              onClick={openChannelSettings}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "#fff", fontWeight: 600, fontSize: "0.95rem", padding: "4px 6px", borderRadius: "6px" }}
-              onMouseEnter={e => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.06)")}
-              onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
+            {activeChannel?.is_private
+              ? <Lock size={16} color="var(--icon-color)" />
+              : <Globe size={16} color="var(--icon-color)" />
+            }
+            <button onClick={openChannelSettings} style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "var(--text-primary)", fontWeight: 600, fontSize: "0.95rem",
+              padding: "4px 6px", borderRadius: "6px",
+            }}
+              onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
+              onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
             >
               {activeChannel?.name}
             </button>
-            <div style={{ width: 1, height: 16, backgroundColor: "rgba(255,255,255,0.1)", margin: "0 4px" }} />
-            <span style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.35)" }}>
-              {members.length} member{members.length !== 1 ? "s" : ""}
+            <div style={{ width: 1, height: 16, backgroundColor: "var(--border-strong)", margin: "0 4px" }} />
+            <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+              {channelMembers.length} member{channelMembers.length !== 1 ? "s" : ""}
             </span>
           </div>
+
           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
             {/* Pinned messages button — shows count if any */}
             {pinnedMessages.length > 0 && (
@@ -483,34 +821,113 @@ export default function WorkspacePage() {
                   display: "flex", alignItems: "center", gap: "5px",
                   background: showPinnedMessages ? "rgba(224,30,90,0.12)" : "none",
                   border: showPinnedMessages ? "1px solid rgba(224,30,90,0.2)" : "1px solid transparent",
-                  cursor: "pointer", color: showPinnedMessages ? "#E01E5A" : "rgba(255,255,255,0.35)",
+                  cursor: "pointer", color: showPinnedMessages ? "#E01E5A" : "var(--text-secondary)",
                   padding: "5px 10px", borderRadius: "7px", fontSize: "0.78rem", fontWeight: 500,
                   transition: "all 0.15s",
-                }}
-                onMouseEnter={e => { e.currentTarget.style.color = "#E01E5A"; e.currentTarget.style.borderColor = "rgba(224,30,90,0.2)"; }}
-                onMouseLeave={e => {
-                  if (!showPinnedMessages) {
-                    e.currentTarget.style.color = "rgba(255,255,255,0.35)";
-                    e.currentTarget.style.borderColor = "transparent";
-                  }
                 }}
               >
                 <Pin size={13} />
                 {pinnedMessages.length} pinned
               </button>
             )}
+
+            {/* ── Theme Picker ── */}
+            <div ref={themePickerRef} style={{ position: "relative" }}>
+              <button
+                onClick={() => setShowThemePicker(p => !p)}
+                title="Switch theme"
+                style={{
+                  background: showThemePicker ? "var(--bg-hover)" : "none",
+                  border: "none", cursor: "pointer",
+                  color: showThemePicker ? "var(--text-primary)" : "var(--text-secondary)",
+                  padding: "6px", borderRadius: "6px", display: "flex", alignItems: "center",
+                  transition: "all 0.15s",
+                }}
+                onMouseEnter={e => { e.currentTarget.style.color = "var(--text-primary)"; e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+                onMouseLeave={e => {
+                  if (!showThemePicker) {
+                    e.currentTarget.style.color = "var(--text-secondary)";
+                    e.currentTarget.style.backgroundColor = "transparent";
+                  }
+                }}
+              >
+                {themeMode === "light"
+                  ? <Sun size={16} />
+                  : themeMode === "dark"
+                  ? <Moon size={16} />
+                  : <Monitor size={16} />
+                }
+              </button>
+
+              {/* Dropdown */}
+              {showThemePicker && (
+                <div style={{
+                  position: "absolute", top: "calc(100% + 8px)", right: 0,
+                  backgroundColor: "var(--bg-secondary)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "10px", padding: "4px",
+                  boxShadow: "0 8px 24px var(--shadow-color)",
+                  zIndex: 100, minWidth: "150px",
+                  animation: "fadeSlideDown 0.15s ease",
+                }}>
+                  {/* Arrow */}
+                  <div style={{
+                    position: "absolute", top: -5, right: 10,
+                    width: 10, height: 10,
+                    backgroundColor: "var(--bg-secondary)",
+                    border: "1px solid var(--border-color)",
+                    borderRight: "none", borderBottom: "none",
+                    transform: "rotate(45deg)",
+                  }} />
+
+                  {(["system", "light", "dark"] as ThemeMode[]).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => handleThemeChange(mode)}
+                      style={{
+                        width: "100%", display: "flex", alignItems: "center", gap: "10px",
+                        padding: "8px 12px", border: "none", cursor: "pointer",
+                        borderRadius: "7px", textAlign: "left", fontSize: "0.85rem",
+                        fontWeight: themeMode === mode ? 600 : 400,
+                        backgroundColor: themeMode === mode ? "rgba(224,30,90,0.1)" : "transparent",
+                        color: themeMode === mode ? "#E01E5A" : "var(--text-primary)",
+                        transition: "all 0.12s",
+                      }}
+                      onMouseEnter={e => {
+                        if (themeMode !== mode) e.currentTarget.style.backgroundColor = "var(--bg-hover)";
+                      }}
+                      onMouseLeave={e => {
+                        if (themeMode !== mode) e.currentTarget.style.backgroundColor = "transparent";
+                      }}
+                    >
+                      {mode === "light" && <Sun size={14} />}
+                      {mode === "dark" && <Moon size={14} />}
+                      {mode === "system" && <Monitor size={14} />}
+                      <span style={{ textTransform: "capitalize" }}>{mode}</span>
+                      {themeMode === mode && (
+                        <div style={{ marginLeft: "auto" }}>
+                          <Check size={13} color="#E01E5A" />
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Settings */}
             <button
               onClick={openChannelSettings}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.35)", padding: "6px", borderRadius: "6px" }}
-              onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-              onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.35)")}
-            ><Settings size={16} /></button>
-            <button
-              style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.35)", padding: "6px", borderRadius: "6px" }}
-              onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-              onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.35)")}
-            ><Bell size={16} /></button>
+              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-secondary)", padding: "6px", borderRadius: "6px" }}
+              onMouseEnter={e => (e.currentTarget.style.color = "var(--text-primary)")}
+              onMouseLeave={e => (e.currentTarget.style.color = "var(--text-secondary)")}
+            >
+              <Settings size={16} />
+            </button>
+
+
           </div>
+
         </div>
 
         {/* Pinned messages banner */}
@@ -523,7 +940,7 @@ export default function WorkspacePage() {
                   Pinned Messages — {pinnedMessages.length}
                 </span>
               </div>
-              <button onClick={() => setShowPinnedMessages(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "2px" }}>
+              <button onClick={() => setShowPinnedMessages(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "2px" }}>
                 <X size={14} />
               </button>
             </div>
@@ -531,15 +948,15 @@ export default function WorkspacePage() {
               <div key={msg.id} style={{
                 display: "flex", alignItems: "flex-start", gap: "10px",
                 padding: "8px 20px",
-                borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none",
+                borderTop: i > 0 ? "1px solid var(--border-color)" : "none",
               }}>
                 <Avatar profile={msg.sender} size={26} />
                 <div style={{ flex: 1, overflow: "hidden" }}>
                   <div style={{ display: "flex", alignItems: "baseline", gap: "7px", marginBottom: "2px" }}>
                     <span style={{ fontSize: "0.8rem", fontWeight: 600 }}>{msg.sender?.full_name}</span>
-                    <span style={{ fontSize: "0.7rem", color: "rgba(255,255,255,0.3)" }}>{formatTime(msg.created_at)}</span>
+                    <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>{formatTime(msg.created_at)}</span>
                   </div>
-                  <p style={{ fontSize: "0.82rem", color: "rgba(255,255,255,0.65)", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <p style={{ fontSize: "0.82rem", color: "var(--text-secondary)", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {msg.content}
                   </p>
                 </div>
@@ -547,9 +964,9 @@ export default function WorkspacePage() {
                   <button
                     onClick={() => togglePinMessage(msg)}
                     title="Unpin"
-                    style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "2px", flexShrink: 0 }}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "2px", flexShrink: 0 }}
                     onMouseEnter={e => (e.currentTarget.style.color = "#f87171")}
-                    onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.3)")}
+                    onMouseLeave={e => (e.currentTarget.style.color = "var(--text-muted)")}
                   >
                     <X size={13} />
                   </button>
@@ -564,38 +981,41 @@ export default function WorkspacePage() {
 
           {/* Lobby header */}
           {isLobby && (
-            <div style={{ marginBottom: "32px", paddingBottom: "24px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            <div style={{ marginBottom: "32px", paddingBottom: "24px", borderBottom: "1px solid var(--border-color)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
                 <div style={{ width: 48, height: 48, borderRadius: 12, backgroundColor: "rgba(224,30,90,0.12)", border: "1px solid rgba(224,30,90,0.2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <Hash size={22} color="#E01E5A" />
+                  <Globe size={22} color="#E01E5A" />
                 </div>
                 <div>
-                  <h2 style={{ fontSize: "1.3rem", fontWeight: 700 }}>Welcome to #{activeChannel?.name}!</h2>
-                  {workspace?.description && <p style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.45)", marginTop: "3px" }}>{workspace.description}</p>}
+                  <h2 style={{ fontSize: "1.3rem", fontWeight: 700, color: "var(--text-primary)" }}>Welcome to #{activeChannel?.name}!</h2>
+                  {workspace?.description && <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginTop: "3px" }}>{workspace.description}</p>}
                 </div>
               </div>
 
               {/* Members grid */}
               <div style={{ marginTop: "20px" }}>
-                <p style={{ fontSize: "0.8rem", fontWeight: 600, color: "rgba(255,255,255,0.35)", marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                  {members.length} Member{members.length !== 1 ? "s" : ""}
+                <p style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: "12px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  {channelMembers.length} Member{channelMembers.length !== 1 ? "s" : ""}
                 </p>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
-                  {members.map(m => (
+                  {channelMembers.map(m => (
+
                     <div key={m.user_id} onClick={() => setShowMemberProfile(m)} style={{
                       display: "flex", flexDirection: "column", alignItems: "center", gap: "6px",
                       padding: "12px 14px", borderRadius: "12px", cursor: "pointer",
-                      backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)",
+                      backgroundColor: "var(--bg-hover)", border: "1px solid var(--border-color)",
                       minWidth: "80px", transition: "all 0.15s",
                     }}
-                      onMouseEnter={e => { e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.07)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
-                      onMouseLeave={e => { e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.03)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.05)"; }}
+                      onMouseEnter={e => { e.currentTarget.style.backgroundColor = "var(--bg-active)"; e.currentTarget.style.borderColor = "var(--border-strong)"; }}
+                      onMouseLeave={e => { e.currentTarget.style.backgroundColor = "var(--bg-hover)"; e.currentTarget.style.borderColor = "var(--border-color)"; }}
                     >
                       <div style={{ position: "relative" }}>
                         <Avatar profile={m.profile} size={40} />
-                        <div style={{ position: "absolute", bottom: 1, right: 1, width: 10, height: 10, borderRadius: "50%", backgroundColor: "#4ade80", border: "2px solid #0f1114" }} />
+                        <div style={{ position: "absolute", bottom: 1, right: 1 }}>
+                          <PresenceDot userId={m.user_id} size={10} borderColor="#0f1114" />
+                        </div>
                       </div>
-                      <span style={{ fontSize: "0.78rem", fontWeight: 500, textAlign: "center", color: "rgba(255,255,255,0.8)" }}>
+                      <span style={{ fontSize: "0.78rem", fontWeight: 500, textAlign: "center", color: "var(--text-primary)" }}>
                         {m.profile?.full_name?.split(" ")[0]}
                       </span>
                       {m.role === "admin" && (
@@ -604,6 +1024,7 @@ export default function WorkspacePage() {
                     </div>
                   ))}
                 </div>
+
               </div>
             </div>
           )}
@@ -619,19 +1040,19 @@ export default function WorkspacePage() {
                 <div key={msg.id}>
                   {showDate && (
                     <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "20px 0 16px" }}>
-                      <div style={{ flex: 1, height: 1, backgroundColor: "rgba(255,255,255,0.06)" }} />
-                      <span style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.3)", fontWeight: 500 }}>{formatDate(msg.created_at)}</span>
-                      <div style={{ flex: 1, height: 1, backgroundColor: "rgba(255,255,255,0.06)" }} />
+                      <div style={{ flex: 1, height: 1, backgroundColor: "var(--divider)" }} />
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 500 }}>{formatDate(msg.created_at)}</span>
+                      <div style={{ flex: 1, height: 1, backgroundColor: "var(--divider)" }} />
                     </div>
                   )}
                   <div style={{ display: "flex", justifyContent: "center", margin: "10px 0" }}>
                     <div style={{
                       display: "inline-flex", alignItems: "center", gap: "7px",
-                      backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)",
+                      backgroundColor: "var(--bg-hover)", border: "1px solid var(--border-color)",
                       borderRadius: "999px", padding: "5px 14px",
                     }}>
                       <div style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: "#4ade80" }} />
-                      <span style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.5)" }}>
+                      <span style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
                         {formatMessageContent(msg.content)}
                       </span>
                     </div>
@@ -645,38 +1066,41 @@ export default function WorkspacePage() {
               <div key={msg.id}>
                 {showDate && (
                   <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "20px 0 16px" }}>
-                    <div style={{ flex: 1, height: 1, backgroundColor: "rgba(255,255,255,0.06)" }} />
-                    <span style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.3)", fontWeight: 500 }}>{formatDate(msg.created_at)}</span>
-                    <div style={{ flex: 1, height: 1, backgroundColor: "rgba(255,255,255,0.06)" }} />
+                    <div style={{ flex: 1, height: 1, backgroundColor: "var(--divider)" }} />
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 500 }}>{formatDate(msg.created_at)}</span>
+                    <div style={{ flex: 1, height: 1, backgroundColor: "var(--divider)" }} />
                   </div>
+
                 )}
                 <div
-                  style={{ position: "relative", display: "flex", gap: "10px", marginBottom: "2px", padding: "4px 8px", borderRadius: "8px", transition: "background 0.1s", backgroundColor: hoveredMessage === msg.id ? "rgba(255,255,255,0.03)" : "transparent" }}
+                  style={{ position: "relative", display: "flex", gap: "10px", marginBottom: "2px", padding: "4px 8px", borderRadius: "8px", transition: "background 0.1s", backgroundColor: hoveredMessage === msg.id ? "var(--bg-message-hover)" : "transparent" }}
                   onMouseEnter={() => setHoveredMessage(msg.id)}
                   onMouseLeave={() => setHoveredMessage(null)}
                 >
                   <Avatar profile={msg.sender} size={34} />
                   <div style={{ flex: 1 }}>
                     <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "3px" }}>
-                      <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>{msg.sender?.full_name || "Unknown"}</span>
-                      <span style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.3)" }}>{formatTime(msg.created_at)}</span>
+
+                      <span style={{ fontWeight: 600, fontSize: "0.88rem", color: "var(--text-primary)" }}>{msg.sender?.full_name || "Unknown"}</span>
+                      <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{formatTime(msg.created_at)}</span>
                       {msg.is_pinned && (
                         <span style={{ display: "inline-flex", alignItems: "center", gap: "3px", fontSize: "0.7rem", color: "#E01E5A" }}>
                           <Pin size={10} /> pinned
                         </span>
                       )}
                     </div>
-                    <p style={{ fontSize: "0.9rem", color: "rgba(255,255,255,0.85)", lineHeight: 1.55, margin: 0 }}>
+                    <p style={{ fontSize: "0.9rem", color: "var(--text-primary)", lineHeight: 1.55, margin: 0 }}>
                       {formatMessageContent(msg.content)}
                     </p>
                   </div>
+
 
                   {/* Hover action toolbar */}
                   {hoveredMessage === msg.id && (
                     <div style={{
                       position: "absolute", top: -14, right: 12,
                       display: "flex", alignItems: "center", gap: "2px",
-                      backgroundColor: "#1e2227", border: "1px solid rgba(255,255,255,0.1)",
+                      backgroundColor: "var(--bg-input)", border: "1px solid var(--border-color)",
                       borderRadius: "8px", padding: "3px 4px",
                       boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
                       zIndex: 10,
@@ -686,24 +1110,13 @@ export default function WorkspacePage() {
                         title={msg.is_pinned ? "Unpin message" : "Pin message"}
                         style={{
                           background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: "6px",
-                          color: msg.is_pinned ? "#E01E5A" : "rgba(255,255,255,0.5)",
+                          color: msg.is_pinned ? "#E01E5A" : "var(--icon-color)",
                           display: "flex", alignItems: "center",
                         }}
-                        onMouseEnter={e => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.07)")}
+                        onMouseEnter={e => (e.currentTarget.style.backgroundColor = "var(--bg-hover)")}
                         onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
                       >
                         <Pin size={14} />
-                      </button>
-                      <button
-                        title="React"
-                        style={{
-                          background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: "6px",
-                          color: "rgba(255,255,255,0.5)", display: "flex", alignItems: "center",
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.07)")}
-                        onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
-                      >
-                        <Smile size={14} />
                       </button>
                     </div>
                   )}
@@ -716,7 +1129,11 @@ export default function WorkspacePage() {
 
         {/* Message input */}
         <div style={{ padding: "12px 20px 16px", flexShrink: 0 }}>
-          <div style={{ backgroundColor: "#1e2227", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "12px", overflow: "hidden" }}>
+          <div style={{
+            backgroundColor: "var(--bg-input)",
+            border: "1px solid var(--border-color)",
+            borderRadius: "12px", overflow: "hidden",
+          }}>
             <textarea
               ref={textareaRef}
               id="message-input"
@@ -736,26 +1153,28 @@ export default function WorkspacePage() {
                   sendMessage();
                 }
               }}
-              placeholder={`Message #${activeChannel?.name || "..."}`}
               style={{
                 width: "100%", padding: "13px 16px 6px",
                 background: "none", border: "none",
-                color: "#fff", fontSize: "0.9rem", outline: "none",
-                resize: "none", fontFamily: "inherit", lineHeight: 1.5,
+                color: "var(--text-primary)",
+                fontSize: "0.9rem", outline: "none", resize: "none",
+                fontFamily: "inherit", lineHeight: 1.5,
                 minHeight: "44px", maxHeight: "120px", display: "block",
               }}
+              placeholder={`Message #${activeChannel?.name || "..."}`}
             />
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 10px 8px" }}>
               <div style={{ display: "flex", gap: "4px" }}>
-                <button type="button" style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "5px", borderRadius: "6px" }}
-                  onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-                  onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.3)")}
+                <button type="button" style={{
+                  background: "none", border: "none", cursor: "pointer",
+                  color: "var(--icon-color)", padding: "5px", borderRadius: "6px",
+                }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "var(--icon-hover)")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "var(--icon-color)")}
                 ><Paperclip size={17} /></button>
-                <button type="button" style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "5px", borderRadius: "6px" }}
-                  onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-                  onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.3)")}
-                ><Smile size={17} /></button>
+
               </div>
+
               <button
                 type="button"
                 onClick={e => {
@@ -765,10 +1184,10 @@ export default function WorkspacePage() {
                 }}
                 disabled={!newMessage.trim() || sending}
                 style={{
-                  backgroundColor: newMessage.trim() ? "#E01E5A" : "rgba(255,255,255,0.08)",
+                  backgroundColor: newMessage.trim() ? "#E01E5A" : "var(--bg-tertiary)",
                   border: "none", borderRadius: "7px", padding: "7px 12px",
                   cursor: newMessage.trim() ? "pointer" : "default",
-                  color: newMessage.trim() ? "#fff" : "rgba(255,255,255,0.3)",
+                  color: newMessage.trim() ? "#fff" : "var(--text-muted)",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   transition: "all 0.15s",
                 }}
@@ -777,7 +1196,7 @@ export default function WorkspacePage() {
               </button>
             </div>
           </div>
-          <p style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.2)", marginTop: "6px", textAlign: "center" }}>
+          <p style={{ fontSize: "0.72rem", color: "var(--text-faint)", marginTop: "6px", textAlign: "center" }}>
             Enter to send · Shift+Enter for new line
           </p>
         </div>
@@ -788,55 +1207,55 @@ export default function WorkspacePage() {
         <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, backdropFilter: "blur(4px)" }}
           onClick={e => { if (e.target === e.currentTarget) setShowCreateChannel(false); }}
         >
-          <div style={{ backgroundColor: "#13161a", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "20px", padding: "32px", width: "100%", maxWidth: "420px", boxShadow: "0 24px 80px rgba(0,0,0,0.5)" }}>
+          <div style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: "20px", padding: "32px", width: "100%", maxWidth: "420px", boxShadow: "0 24px 80px var(--shadow-color)" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
-              <h2 style={{ fontSize: "1.1rem", fontWeight: 700 }}>Create a channel</h2>
-              <button onClick={() => setShowCreateChannel(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", padding: "4px" }}>
+              <h2 style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>Create a channel</h2>
+              <button onClick={() => setShowCreateChannel(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "4px" }}>
                 <X size={18} />
               </button>
             </div>
 
             <div style={{ marginBottom: "14px" }}>
-              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 500, color: "rgba(255,255,255,0.5)", marginBottom: "6px" }}>Channel name *</label>
+              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }}>Channel name <span style={{ color: "#E01E5A" }}>*</span></label>
               <div style={{ position: "relative" }}>
-                <Hash size={14} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.3)" }} />
+                <Hash size={14} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
                 <input type="text" placeholder="e.g. marketing" value={newChannelName}
                   onChange={e => setNewChannelName(e.target.value.toLowerCase().replace(/\s+/g, "-"))}
-                  style={{ width: "100%", padding: "10px 12px 10px 30px", backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)", borderRadius: "8px", color: "#fff", fontSize: "0.88rem", outline: "none" }}
+                  style={{ width: "100%", padding: "10px 12px 10px 30px", backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)", borderRadius: "8px", color: "var(--text-primary)", fontSize: "0.88rem", outline: "none" }}
                   onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                  onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                 />
               </div>
             </div>
 
             <div style={{ marginBottom: "16px" }}>
-              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 500, color: "rgba(255,255,255,0.5)", marginBottom: "6px" }}>Description <span style={{ color: "rgba(255,255,255,0.25)" }}>(optional)</span></label>
+              <label style={{ display: "block", fontSize: "0.8rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }}>Description <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>optional</span></label>
               <input type="text" placeholder="What's this channel about?" value={newChannelDesc}
                 onChange={e => setNewChannelDesc(e.target.value)}
-                style={{ width: "100%", padding: "10px 12px", backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)", borderRadius: "8px", color: "#fff", fontSize: "0.88rem", outline: "none" }}
+                style={{ width: "100%", padding: "10px 12px", backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)", borderRadius: "8px", color: "var(--text-primary)", fontSize: "0.88rem", outline: "none" }}
                 onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
               />
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", backgroundColor: "rgba(255,255,255,0.03)", borderRadius: "10px", marginBottom: "24px", cursor: "pointer" }}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "10px", marginBottom: "24px", cursor: "pointer" }}
               onClick={() => setNewChannelPrivate(p => !p)}>
               <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                <Lock size={15} color="rgba(255,255,255,0.5)" />
+                <Lock size={15} color="var(--icon-color)" />
                 <div>
-                  <div style={{ fontSize: "0.85rem", fontWeight: 500 }}>Private channel</div>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)" }}>Only invited members can see it</div>
+                  <div style={{ fontSize: "0.85rem", fontWeight: 500, color: "var(--text-primary)" }}>Private channel</div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Only invited members can see it</div>
                 </div>
               </div>
-              <div style={{ width: 36, height: 20, borderRadius: 999, backgroundColor: newChannelPrivate ? "#E01E5A" : "rgba(255,255,255,0.1)", position: "relative", transition: "background 0.2s" }}>
+              <div style={{ width: 36, height: 20, borderRadius: 999, backgroundColor: newChannelPrivate ? "#E01E5A" : "var(--border-strong)", position: "relative", transition: "background 0.2s" }}>
                 <div style={{ position: "absolute", top: 2, left: newChannelPrivate ? 18 : 2, width: 16, height: 16, borderRadius: "50%", backgroundColor: "#fff", transition: "left 0.2s" }} />
               </div>
             </div>
 
             <button onClick={createChannel} disabled={!newChannelName.trim() || creatingChannel} style={{
               width: "100%", padding: "12px", borderRadius: "10px",
-              backgroundColor: newChannelName.trim() ? "#E01E5A" : "rgba(255,255,255,0.08)",
-              color: newChannelName.trim() ? "#fff" : "rgba(255,255,255,0.3)",
+              backgroundColor: newChannelName.trim() ? "#E01E5A" : "var(--bg-tertiary)",
+              color: newChannelName.trim() ? "#fff" : "var(--text-muted)",
               border: "none", fontSize: "0.9rem", fontWeight: 600, cursor: newChannelName.trim() ? "pointer" : "default",
               display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
             }}>
@@ -851,36 +1270,30 @@ export default function WorkspacePage() {
         <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, backdropFilter: "blur(4px)" }}
           onClick={e => { if (e.target === e.currentTarget) setShowMemberProfile(null); }}
         >
-          <div style={{ backgroundColor: "#13161a", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "20px", width: "100%", maxWidth: "320px", overflow: "hidden", boxShadow: "0 24px 80px rgba(0,0,0,0.5)" }}>
+          <div style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: "20px", width: "100%", maxWidth: "320px", overflow: "hidden", boxShadow: "0 24px 80px var(--shadow-color)" }}>
             {/* Banner */}
             <div style={{ height: 80, background: "linear-gradient(135deg, #E01E5A 0%, #c084fc 100%)", position: "relative" }}>
-              <button onClick={() => setShowMemberProfile(null)} style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.3)", border: "none", cursor: "pointer", color: "#fff", borderRadius: "6px", padding: "4px 6px" }}>
+              <button onClick={() => setShowMemberProfile(null)} style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.3)", border: "none", cursor: "pointer", color: "var(--text-inverse)", borderRadius: "6px", padding: "4px 6px" }}>
                 <X size={14} />
               </button>
             </div>
             <div style={{ padding: "0 20px 24px" }}>
-              <div style={{ marginTop: "-28px", marginBottom: "14px", position: "relative", display: "inline-block" }}>
+              <div style={{ marginTop: "-28px", marginBottom: "12px" }}>
                 <Avatar profile={showMemberProfile.profile} size={56} />
-                <div style={{ position: "absolute", bottom: 2, right: 2, width: 13, height: 13, borderRadius: "50%", backgroundColor: "#4ade80", border: "2.5px solid #13161a" }} />
               </div>
-              <h3 style={{ fontSize: "1.05rem", fontWeight: 700, marginBottom: "2px" }}>{showMemberProfile.profile?.full_name}</h3>
-              <p style={{ fontSize: "0.82rem", color: "rgba(255,255,255,0.45)", marginBottom: "16px" }}>{showMemberProfile.profile?.job_title}</p>
-              <div style={{ backgroundColor: "rgba(255,255,255,0.03)", borderRadius: "10px", padding: "12px 14px", marginBottom: "16px" }}>
-                <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>Email</div>
-                <div style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>{showMemberProfile.profile?.email}</div>
+              <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "var(--text-primary)", marginBottom: 3 }}>
+                {showMemberProfile.profile?.full_name}
               </div>
-              <div style={{ display: "flex", gap: "8px" }}>
-                <div style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.03)", borderRadius: "10px", padding: "12px 14px" }}>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>Role</div>
-                  <div style={{ fontSize: "0.85rem", color: showMemberProfile.role === "admin" ? "#E01E5A" : "rgba(255,255,255,0.7)", fontWeight: 500, textTransform: "capitalize" }}>{showMemberProfile.role}</div>
+              {showMemberProfile.profile?.job_title && (
+                <div style={{ fontSize: "0.82rem", color: "var(--text-muted)", marginBottom: 16 }}>
+                  {showMemberProfile.profile.job_title}
                 </div>
-                <div style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.03)", borderRadius: "10px", padding: "12px 14px" }}>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>Status</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
-                    <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: "#4ade80" }} />
-                    <span style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>Active</span>
-                  </div>
-                </div>
+              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", backgroundColor: "var(--bg-tertiary)", borderRadius: 9, border: "1px solid var(--border-color)" }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: onlineUsers.has(showMemberProfile.user_id) ? "#4ade80" : "var(--text-faint)" }} />
+                <span style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                  {onlineUsers.has(showMemberProfile.user_id) ? "Online" : "Offline"}
+                </span>
               </div>
             </div>
           </div>
@@ -899,28 +1312,31 @@ export default function WorkspacePage() {
           {/* Slide-in panel */}
           <div style={{
             width: "100%", maxWidth: "360px", height: "100%",
-            backgroundColor: "#13161a", borderLeft: "1px solid rgba(255,255,255,0.07)",
+            backgroundColor: "var(--bg-secondary)",
+            borderLeft: "1px solid var(--border-color)",
             display: "flex", flexDirection: "column", overflowY: "auto",
-            boxShadow: "-16px 0 48px rgba(0,0,0,0.4)",
+            boxShadow: "-16px 0 48px var(--shadow-color)",
           }}>
             {/* Panel header */}
             <div style={{ padding: "20px 20px 0", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                {activeChannel.is_private ? <Lock size={16} color="rgba(255,255,255,0.5)" /> : <Hash size={16} color="rgba(255,255,255,0.5)" />}
-                <span style={{ fontWeight: 700, fontSize: "1rem" }}>{activeChannel.name}</span>
+                {activeChannel.is_private ? <Lock size={16} color="var(--icon-color)" /> : <Globe size={16} color="var(--icon-color)" />}
+                <span style={{ fontWeight: 700, fontSize: "1rem", color: "var(--text-primary)" }}>{activeChannel.name}</span>
               </div>
-              <button onClick={() => setShowChannelSettings(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", padding: "4px" }}>
+              <button onClick={() => setShowChannelSettings(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "4px", borderRadius: 6 }}
+                onMouseEnter={e => (e.currentTarget.style.color = "var(--text-primary)")}
+                onMouseLeave={e => (e.currentTarget.style.color = "var(--icon-color)")}>
                 <X size={18} />
               </button>
             </div>
 
             {/* Tabs */}
-            <div style={{ display: "flex", gap: "4px", padding: "16px 20px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 }}>
+            <div style={{ display: "flex", gap: "4px", padding: "16px 20px 0", borderBottom: "1px solid var(--border-color)", flexShrink: 0 }}>
               {(["about", "members"] as const).map(tab => (
                 <button key={tab} onClick={() => setChannelSettingsTab(tab)} style={{
                   padding: "8px 16px", border: "none", cursor: "pointer", background: "none",
                   fontSize: "0.85rem", fontWeight: 500, textTransform: "capitalize",
-                  color: channelSettingsTab === tab ? "#fff" : "rgba(255,255,255,0.4)",
+                  color: channelSettingsTab === tab ? "var(--text-primary)" : "var(--text-muted)",
                   borderBottom: channelSettingsTab === tab ? "2px solid #E01E5A" : "2px solid transparent",
                   marginBottom: "-1px", transition: "all 0.15s",
                 }}>
@@ -935,11 +1351,11 @@ export default function WorkspacePage() {
               {channelSettingsTab === "about" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
                   <div>
-                    <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
+                    <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
                       Channel Name
                     </label>
                     <div style={{ position: "relative" }}>
-                      <Hash size={14} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.3)" }} />
+                      <Hash size={14} style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
                       <input
                         id="edit-channel-name"
                         name="edit-channel-name"
@@ -949,21 +1365,21 @@ export default function WorkspacePage() {
                         disabled={activeChannel.is_default}
                         style={{
                           width: "100%", padding: "10px 12px 10px 30px",
-                          backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                          borderRadius: "8px", color: activeChannel.is_default ? "rgba(255,255,255,0.3)" : "#fff",
+                          backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                          borderRadius: "8px", color: activeChannel.is_default ? "var(--text-muted)" : "var(--text-primary)",
                           fontSize: "0.88rem", outline: "none",
                         }}
                         onFocus={e => { if (!activeChannel.is_default) e.target.style.borderColor = "#E01E5A"; }}
-                        onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                        onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                       />
                     </div>
                     {activeChannel.is_default && (
-                      <p style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.25)", marginTop: "5px" }}>The Lobby channel name cannot be changed.</p>
+                      <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "5px" }}>The Lobby channel name cannot be changed.</p>
                     )}
                   </div>
 
                   <div>
-                    <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
+                    <label style={{ display: "block", fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
                       Description
                     </label>
                     <textarea
@@ -975,27 +1391,27 @@ export default function WorkspacePage() {
                       placeholder="What's this channel about?"
                       style={{
                         width: "100%", padding: "10px 12px", resize: "none",
-                        backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                        borderRadius: "8px", color: "#fff", fontSize: "0.88rem", outline: "none",
+                        backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                        borderRadius: "8px", color: "var(--text-primary)", fontSize: "0.88rem", outline: "none",
                         fontFamily: "inherit",
                       }}
                       onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                      onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                      onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                     />
                   </div>
 
                   {/* Private toggle */}
                   {!activeChannel.is_default && (
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", backgroundColor: "rgba(255,255,255,0.03)", borderRadius: "10px", cursor: "pointer" }}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "10px", cursor: "pointer" }}
                       onClick={() => setEditChannelPrivate(p => !p)}>
                       <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                        <Lock size={15} color="rgba(255,255,255,0.5)" />
+                        <Lock size={15} color="var(--icon-color)" />
                         <div>
-                          <div style={{ fontSize: "0.85rem", fontWeight: 500 }}>Private channel</div>
-                          <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)" }}>Only invited members can see it</div>
+                          <div style={{ fontSize: "0.85rem", fontWeight: 500, color: "var(--text-primary)" }}>Private channel</div>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Only invited members can see it</div>
                         </div>
                       </div>
-                      <div style={{ width: 36, height: 20, borderRadius: 999, backgroundColor: editChannelPrivate ? "#E01E5A" : "rgba(255,255,255,0.1)", position: "relative", transition: "background 0.2s" }}>
+                      <div style={{ width: 36, height: 20, borderRadius: 999, backgroundColor: editChannelPrivate ? "#E01E5A" : "var(--border-strong)", position: "relative", transition: "background 0.2s" }}>
                         <div style={{ position: "absolute", top: 2, left: editChannelPrivate ? 18 : 2, width: 16, height: 16, borderRadius: "50%", backgroundColor: "#fff", transition: "left 0.2s" }} />
                       </div>
                     </div>
@@ -1037,24 +1453,26 @@ export default function WorkspacePage() {
 
                   {/* In channel */}
                   <div>
-                    <p style={{ fontSize: "0.78rem", fontWeight: 600, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "10px" }}>
-                      In this channel — {channelMembers.length}
+                    <p style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "10px" }}>
+                      In this channel · {channelMembers.length}
                     </p>
                     {channelMembers.length === 0 && (
-                      <p style={{ fontSize: "0.83rem", color: "rgba(255,255,255,0.25)" }}>No members yet.</p>
+                      <p style={{ fontSize: "0.83rem", color: "var(--text-faint)" }}>No members yet.</p>
                     )}
                     {channelMembers.map(m => (
-                      <div key={m.user_id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <div key={m.user_id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0", borderBottom: "1px solid var(--border-color)" }}>
                         <Avatar profile={m.profile} size={32} />
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: "0.87rem", fontWeight: 500 }}>{m.profile?.full_name}</div>
-                          <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)" }}>{m.profile?.job_title}</div>
+                          <div style={{ fontSize: "0.87rem", fontWeight: 500, color: "var(--text-primary)" }}>{m.profile?.full_name}</div>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{m.profile?.job_title}</div>
                         </div>
                         {m.user_id !== me?.id && !activeChannel.is_default && (
                           <button onClick={() => removeMemberFromChannel(m.user_id)} style={{
                             background: "none", border: "1px solid rgba(248,113,113,0.25)", borderRadius: "6px",
                             color: "#f87171", fontSize: "0.75rem", padding: "3px 10px", cursor: "pointer",
-                          }}>
+                          }}
+                            onMouseEnter={e => (e.currentTarget.style.backgroundColor = "rgba(248,113,113,0.08)")}
+                            onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}>
                             Remove
                           </button>
                         )}
@@ -1065,15 +1483,15 @@ export default function WorkspacePage() {
                   {/* Add members */}
                   {nonChannelMembers.length > 0 && (
                     <div>
-                      <p style={{ fontSize: "0.78rem", fontWeight: 600, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "10px" }}>
+                      <p style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "10px" }}>
                         Add to channel
                       </p>
                       {nonChannelMembers.map(m => (
-                        <div key={m.user_id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                        <div key={m.user_id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px 0", borderBottom: "1px solid var(--border-color)" }}>
                           <Avatar profile={m.profile} size={32} />
                           <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: "0.87rem", fontWeight: 500 }}>{m.profile?.full_name}</div>
-                            <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)" }}>{m.profile?.job_title}</div>
+                            <div style={{ fontSize: "0.87rem", fontWeight: 500, color: "var(--text-primary)" }}>{m.profile?.full_name}</div>
+                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{m.profile?.job_title}</div>
                           </div>
                           <button onClick={() => addMemberToChannel(m.user_id)} style={{
                             background: "none", border: "1px solid rgba(224,30,90,0.3)", borderRadius: "6px",
@@ -1100,56 +1518,102 @@ export default function WorkspacePage() {
         >
           <div style={{
             width: "100%", maxWidth: "440px",
-            backgroundColor: "#13161a", border: "1px solid rgba(255,255,255,0.07)",
-            borderRadius: "22px", overflow: "hidden",
-            boxShadow: "0 24px 80px rgba(0,0,0,0.5)",
+            backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)",
+            borderRadius: "22px", overflow: "visible",
+            boxShadow: "0 24px 80px var(--shadow-color)",
+            position: 'relative',
+            zIndex: 1,
           }}>
 
-            {/* Banner */}
-            <div style={{ height: 90, background: "linear-gradient(135deg, #1a1d21 0%, #2a1520 50%, #1a1d21 100%)", position: "relative", display: "flex", alignItems: "flex-end", padding: "0 24px 0" }}>
-              <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 300, height: 300, borderRadius: "50%", background: "radial-gradient(circle, rgba(224,30,90,0.15) 0%, transparent 70%)", pointerEvents: "none" }} />
+            {/* Banner — clip only the banner itself to respect top border radius */}
+            <div style={{
+              height: 90,
+              background: 'linear-gradient(135deg, #1a1d21 0%, #2a1520 50%, #1a1d21 100%)',
+              position: 'relative',
+              borderRadius: '22px 22px 0 0',   // ← top corners rounded, banner clips itself
+              overflow: 'hidden',               // ← overflow hidden only on banner
+            }}>
+              {/* glow */}
+              <div style={{
+                position: 'absolute', top: '50%', left: '50%',
+                transform: 'translate(-50%,-50%)',
+                width: 300, height: 300, borderRadius: '50%',
+                background: 'radial-gradient(circle, rgba(224,30,90,0.15) 0%, transparent 70%)',
+                pointerEvents: 'none',
+              }} />
               <button
                 onClick={() => setShowWorkspaceInfo(false)}
-                style={{ position: "absolute", top: 14, right: 14, background: "rgba(255,255,255,0.08)", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.6)", borderRadius: "7px", padding: "5px 7px", display: "flex" }}
+                style={{
+                  position: 'absolute', top: 14, right: 14,
+                  background: 'rgba(255,255,255,0.08)', border: 'none',
+                  cursor: 'pointer', color: 'rgba(255,255,255,0.6)',
+                  borderRadius: 7, padding: '5px 7px', display: 'flex',
+                }}
               >
                 <X size={15} />
               </button>
             </div>
 
             <div style={{ padding: "0 24px 28px" }}>
-              {/* Workspace avatar */}
-              <div style={{ marginTop: "-24px", marginBottom: "16px" }}>
+              {/* Avatar overlapping the banner */}
+              <div style={{ marginTop: "-36px", marginBottom: "14px", position: 'relative', zIndex: 2 }}>
                 {workspace.image_url
-                  ? <img src={workspace.image_url} style={{ width: 52, height: 52, borderRadius: 13, objectFit: "cover", border: "3px solid #13161a" }} alt="" />
-                  : <div style={{ width: 52, height: 52, borderRadius: 13, backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", border: "3px solid #13161a" }}>
-                      <MessageSquare size={22} color="#fff" />
+                  ? <img
+                      src={workspace.image_url}
+                      style={{
+                        width: 72,
+                        height: 72,
+                        borderRadius: 16,
+                        objectFit: 'cover',
+                        border: '4px solid var(--bg-secondary)',
+                        display: 'block',
+                        boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+                      }}
+                      alt=""
+                    />
+                  : <div style={{
+                      width: 72,
+                      height: 72,
+                      borderRadius: 16,
+                      backgroundColor: '#E01E5A',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      border: '4px solid var(--bg-secondary)',
+                      fontSize: '1.8rem',
+                      fontWeight: 700,
+                      color: '#fff',
+                      flexShrink: 0,
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+                    }}>
+                      {workspace.name?.[0]?.toUpperCase()}
                     </div>
                 }
               </div>
 
               {/* Workspace name & description */}
-              <h2 style={{ fontSize: "1.2rem", fontWeight: 700, marginBottom: "6px" }}>{workspace.name}</h2>
+              <h2 style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--text-primary)", marginBottom: "6px" }}>{workspace.name}</h2>
               {workspace.description && (
-                <p style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.45)", lineHeight: 1.6, marginBottom: "20px" }}>
+                <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: "20px" }}>
                   {workspace.description}
                 </p>
               )}
 
               {/* Stats row */}
               <div style={{ display: "flex", gap: "10px", marginBottom: "24px", marginTop: workspace.description ? "0" : "16px" }}>
-                <div style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px", padding: "12px 14px" }}>
-                  <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "#fff" }}>{members.length}</div>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)", marginTop: "2px" }}>Members</div>
+                <div style={{ flex: 1, backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "10px", padding: "12px 14px" }}>
+                  <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--text-primary)" }}>{members.length}</div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "2px" }}>Members</div>
                 </div>
-                <div style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px", padding: "12px 14px" }}>
-                  <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "#fff" }}>{channels.length}</div>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)", marginTop: "2px" }}>Channels</div>
+                <div style={{ flex: 1, backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "10px", padding: "12px 14px" }}>
+                  <div style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--text-primary)" }}>{channels.length}</div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "2px" }}>Channels</div>
                 </div>
-                <div style={{ flex: 1, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "10px", padding: "12px 14px" }}>
-                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: workspace.owner_id === me?.id ? "#E01E5A" : "rgba(255,255,255,0.6)", textTransform: "capitalize" }}>
+                <div style={{ flex: 1, backgroundColor: "var(--bg-tertiary)", border: "1px solid var(--border-color)", borderRadius: "10px", padding: "12px 14px" }}>
+                  <div style={{ fontSize: "0.75rem", fontWeight: 600, color: workspace.owner_id === me?.id ? "#E01E5A" : "var(--text-secondary)", textTransform: "capitalize" }}>
                     {workspace.owner_id === me?.id ? "Admin" : "Member"}
                   </div>
-                  <div style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.35)", marginTop: "2px" }}>Your role</div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "2px" }}>Your role</div>
                 </div>
               </div>
 
@@ -1161,17 +1625,17 @@ export default function WorkspacePage() {
                     Workspace ID
                   </span>
                 </div>
-                <p style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.4)", marginBottom: "14px", lineHeight: 1.5 }}>
+                <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "14px", lineHeight: 1.5 }}>
                   Share this ID with teammates so they can join your workspace during sign up.
                 </p>
 
                 {/* Code display */}
                 <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                  <div style={{
-                    flex: 1, backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
+                <div style={{
+                    flex: 1, backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
                     borderRadius: "10px", padding: "12px 16px",
                     fontFamily: "monospace", fontSize: "1.3rem", fontWeight: 700,
-                    letterSpacing: "0.18em", color: "#fff", textAlign: "center",
+                    letterSpacing: "0.18em", color: "var(--text-primary)", textAlign: "center",
                   }}>
                     {workspace.workspace_code}
                   </div>
@@ -1195,12 +1659,12 @@ export default function WorkspacePage() {
                 onClick={signOut}
                 style={{
                   width: "100%", marginTop: "14px", padding: "10px", borderRadius: "9px",
-                  background: "none", border: "1px solid rgba(255,255,255,0.07)",
-                  color: "rgba(255,255,255,0.35)", fontSize: "0.85rem", cursor: "pointer",
+                  background: "none", border: "1px solid var(--border-color)",
+                  color: "var(--text-muted)", fontSize: "0.85rem", cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center", gap: "7px",
                 }}
-                onMouseEnter={e => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.borderColor = "rgba(248,113,113,0.2)"; }}
-                onMouseLeave={e => { e.currentTarget.style.color = "rgba(255,255,255,0.35)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.07)"; }}
+                onMouseEnter={e => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.borderColor = "rgba(248,113,113,0.3)"; }}
+                onMouseLeave={e => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.borderColor = "var(--border-color)"; }}
               >
                 <LogOut size={15} /> Sign out
               </button>

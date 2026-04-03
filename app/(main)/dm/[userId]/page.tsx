@@ -7,6 +7,7 @@ import { supabase } from "@/lib/supabase";
 
 type Profile = { id: string; full_name: string; job_title: string; avatar_url: string; email: string };
 type DM = { id: string; content: string; created_at: string; sender_id: string; receiver_id: string };
+type ThemeMode = "system" | "dark" | "light";
 
 export default function DMPage() {
   const { userId } = useParams<{ userId: string }>();
@@ -21,11 +22,24 @@ export default function DMPage() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [workspaceId, setWorkspaceId] = useState(fromWorkspace || "");
+  const [isOtherOnline, setIsOtherOnline] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const presenceRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
-  useEffect(() => { init(); }, [userId]);
+  useEffect(() => {
+    const saved = (localStorage.getItem("trexaflow_theme") as ThemeMode) || "dark";
+    setThemeMode(saved);
+  }, []);
+
+  useEffect(() => {
+    const p = init();
+    return () => {
+      p.then(cleanup => cleanup?.());
+    };
+  }, [userId]);
 
   const init = async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -53,7 +67,7 @@ export default function DMPage() {
     await loadMessages(user.id);
     setLoading(false);
 
-    // Realtime subscription
+    // Realtime messages subscription
     const channelKey = [user.id, userId].sort().join("-");
     const sub = supabase.channel(`dm:${channelKey}`)
       .on("postgres_changes", {
@@ -70,8 +84,46 @@ export default function DMPage() {
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(sub); };
+    // Presence for DM page — tear down any existing channel first
+    if (presenceRef.current) {
+      await presenceRef.current.untrack();
+      supabase.removeChannel(presenceRef.current);
+      presenceRef.current = null;
+    }
+
+    const dmPresence = supabase.channel(`presence:dm-check-${userId}`, {
+      config: { presence: { key: user.id } },
+    });
+
+    dmPresence
+      .on("presence", { event: "sync" }, () => {
+        const state = dmPresence.presenceState();
+        setIsOtherOnline(Object.keys(state).includes(userId));
+      })
+      .on("presence", { event: "join" }, ({ key }: { key: string }) => {
+        if (key === userId) setIsOtherOnline(true);
+      })
+      .on("presence", { event: "leave" }, ({ key }: { key: string }) => {
+        if (key === userId) setIsOtherOnline(false);
+      })
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          await dmPresence.track({ user_id: user.id });
+        }
+      });
+
+    presenceRef.current = dmPresence;
+
+    return () => {
+      supabase.removeChannel(sub);
+      if (presenceRef.current) {
+        presenceRef.current.untrack();
+        supabase.removeChannel(presenceRef.current);
+        presenceRef.current = null;
+      }
+    };
   };
+
 
   const loadMessages = async (myId: string) => {
     const { data } = await supabase
@@ -110,7 +162,7 @@ export default function DMPage() {
   const Avatar = ({ profile, size = 32 }: { profile?: Profile | null; size?: number }) => (
     profile?.avatar_url
       ? <img src={profile.avatar_url} style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} alt="" />
-      : <div style={{ width: size, height: size, borderRadius: "50%", backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.35, fontWeight: 700, color: "#fff", flexShrink: 0 }}>
+      : <div style={{ width: size, height: size, borderRadius: "50%", backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.35, fontWeight: 700, color: "#ffffff", flexShrink: 0 }}>
           {getInitials(profile?.full_name || "?")}
         </div>
   );
@@ -121,31 +173,50 @@ export default function DMPage() {
   };
 
   if (loading) return (
-    <div style={{ minHeight: "100vh", backgroundColor: "#0f1114", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <Loader2 size={28} color="#E01E5A" className="animate-spin" />
     </div>
   );
 
   return (
-    <div style={{ display: "flex", height: "100vh", backgroundColor: "#0f1114", color: "#fff", fontFamily: "var(--font-geist-sans), -apple-system, sans-serif", flexDirection: "column" }}>
+    <div
+      data-theme={themeMode === "system" ? undefined : themeMode}
+      style={{
+        display: "flex", height: "100vh",
+        backgroundColor: "var(--bg-primary)",
+        color: "var(--text-primary)",
+        fontFamily: "var(--font-geist-sans), -apple-system, sans-serif",
+        flexDirection: "column"
+      }}
+    >
 
       {/* ── Header ── */}
-      <div style={{ height: 56, borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: "12px", padding: "0 20px", flexShrink: 0, backgroundColor: "#13161a" }}>
-        <button onClick={goBack} style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", padding: "6px", borderRadius: "7px" }}
-          onMouseEnter={e => { e.currentTarget.style.color = "#fff"; e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.06)"; }}
-          onMouseLeave={e => { e.currentTarget.style.color = "rgba(255,255,255,0.4)"; e.currentTarget.style.backgroundColor = "transparent"; }}
+      <div style={{ height: 56, borderBottom: "1px solid var(--border-color)", display: "flex", alignItems: "center", gap: "12px", padding: "0 20px", flexShrink: 0, backgroundColor: "var(--bg-topbar)" }}>
+        <button onClick={goBack} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", display: "flex", alignItems: "center", padding: "6px", borderRadius: "7px" }}
+          onMouseEnter={e => { e.currentTarget.style.color = "var(--icon-hover)"; e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+          onMouseLeave={e => { e.currentTarget.style.color = "var(--icon-color)"; e.currentTarget.style.backgroundColor = "transparent"; }}
         >
           <ArrowLeft size={18} />
         </button>
-        <div style={{ width: 1, height: 20, backgroundColor: "rgba(255,255,255,0.08)" }} />
+        <div style={{ width: 1, height: 20, backgroundColor: "var(--border-color)" }} />
         <div style={{ position: "relative" }}>
           <Avatar profile={other} size={34} />
-          <div style={{ position: "absolute", bottom: 0, right: 0, width: 10, height: 10, borderRadius: "50%", backgroundColor: "#4ade80", border: "2px solid #13161a" }} />
+          <div style={{
+            position: "absolute", bottom: 0, right: 0,
+            width: 10, height: 10, borderRadius: "50%",
+            backgroundColor: isOtherOnline ? "#4ade80" : "var(--text-muted)",
+            border: "2px solid var(--bg-topbar)",
+            transition: "background-color 0.4s ease",
+          }} />
         </div>
+
         <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 600, fontSize: "0.92rem" }}>{other?.full_name}</div>
-          <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.35)" }}>{other?.job_title}</div>
+          <div style={{ fontWeight: 600, fontSize: "0.92rem", color: "var(--text-primary)" }}>{other?.full_name}</div>
+          <div style={{ fontSize: "0.72rem", color: isOtherOnline ? "#4ade80" : "var(--text-muted)" }}>
+            {isOtherOnline ? "● Online" : "○ Offline"}
+          </div>
         </div>
+
       </div>
 
       {/* ── Messages ── */}
@@ -156,15 +227,22 @@ export default function DMPage() {
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "80%", gap: "16px" }}>
             <div style={{ position: "relative" }}>
               <Avatar profile={other} size={72} />
-              <div style={{ position: "absolute", bottom: 3, right: 3, width: 16, height: 16, borderRadius: "50%", backgroundColor: "#4ade80", border: "3px solid #0f1114" }} />
+              <div style={{
+                position: "absolute", bottom: 3, right: 3,
+                width: 16, height: 16, borderRadius: "50%",
+                backgroundColor: isOtherOnline ? "#4ade80" : "var(--text-muted)",
+                border: "3px solid var(--bg-primary)",
+                transition: "background-color 0.4s ease",
+              }} />
             </div>
+
             <div style={{ textAlign: "center" }}>
-              <h3 style={{ fontWeight: 700, fontSize: "1.1rem", marginBottom: "6px" }}>{other?.full_name}</h3>
-              <p style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.4)" }}>{other?.job_title}</p>
+              <h3 style={{ fontWeight: 700, fontSize: "1.1rem", marginBottom: "6px", color: "var(--text-primary)" }}>{other?.full_name}</h3>
+              <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>{other?.job_title}</p>
             </div>
-            <div style={{ padding: "10px 20px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "999px" }}>
-              <p style={{ fontSize: "0.82rem", color: "rgba(255,255,255,0.4)" }}>
-                This is the beginning of your conversation with <strong style={{ color: "rgba(255,255,255,0.7)" }}>{other?.full_name}</strong>
+            <div style={{ padding: "10px 20px", backgroundColor: "var(--bg-hover)", border: "1px solid var(--border-color)", borderRadius: "999px" }}>
+              <p style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
+                This is the beginning of your conversation with <strong style={{ color: "var(--text-primary)" }}>{other?.full_name}</strong>
               </p>
             </div>
           </div>
@@ -181,13 +259,13 @@ export default function DMPage() {
             <div key={msg.id}>
               {showDate && (
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", margin: "20px 0 16px" }}>
-                  <div style={{ flex: 1, height: 1, backgroundColor: "rgba(255,255,255,0.06)" }} />
-                  <span style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.3)", fontWeight: 500 }}>{formatDate(msg.created_at)}</span>
-                  <div style={{ flex: 1, height: 1, backgroundColor: "rgba(255,255,255,0.06)" }} />
+                  <div style={{ flex: 1, height: 1, backgroundColor: "var(--divider)" }} />
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 500 }}>{formatDate(msg.created_at)}</span>
+                  <div style={{ flex: 1, height: 1, backgroundColor: "var(--divider)" }} />
                 </div>
               )}
               <div style={{ display: "flex", gap: "10px", marginBottom: "2px", padding: "3px 8px", borderRadius: "8px", transition: "background 0.1s" }}
-                onMouseEnter={e => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.03)")}
+                onMouseEnter={e => (e.currentTarget.style.backgroundColor = "var(--bg-message-hover)")}
                 onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
               >
                 {/* Avatar — only show when sender changes */}
@@ -197,11 +275,11 @@ export default function DMPage() {
                 <div style={{ flex: 1 }}>
                   {showAvatar && (
                     <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "3px" }}>
-                      <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>{senderProfile?.full_name}</span>
-                      <span style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.3)" }}>{formatTime(msg.created_at)}</span>
+                      <span style={{ fontWeight: 600, fontSize: "0.88rem", color: "var(--text-primary)" }}>{senderProfile?.full_name}</span>
+                      <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{formatTime(msg.created_at)}</span>
                     </div>
                   )}
-                  <p style={{ fontSize: "0.9rem", color: "rgba(255,255,255,0.85)", lineHeight: 1.55, margin: 0 }}>
+                  <p style={{ fontSize: "0.9rem", color: "var(--text-primary)", lineHeight: 1.55, margin: 0 }}>
                     {msg.content}
                   </p>
                 </div>
@@ -214,7 +292,7 @@ export default function DMPage() {
 
       {/* ── Input ── */}
       <div style={{ padding: "12px 20px 16px", flexShrink: 0 }}>
-        <div style={{ backgroundColor: "#1e2227", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "12px", overflow: "hidden" }}>
+        <div style={{ backgroundColor: "var(--bg-input)", border: "1px solid var(--border-color)", borderRadius: "12px", overflow: "hidden" }}>
           <textarea
             ref={textareaRef}
             id="dm-input"
@@ -230,7 +308,7 @@ export default function DMPage() {
             placeholder={`Message ${other?.full_name || "..."}`}
             style={{
               width: "100%", padding: "13px 16px 6px",
-              background: "none", border: "none", color: "#fff",
+              background: "none", border: "none", color: "var(--text-primary)",
               fontSize: "0.9rem", outline: "none", resize: "none",
               fontFamily: "inherit", lineHeight: 1.5,
               minHeight: "44px", maxHeight: "120px", display: "block",
@@ -238,13 +316,13 @@ export default function DMPage() {
           />
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 10px 8px" }}>
             <div style={{ display: "flex", gap: "4px" }}>
-              <button type="button" style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "5px", borderRadius: "6px" }}
-                onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-                onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.3)")}
+              <button type="button" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "5px", borderRadius: "6px" }}
+                onMouseEnter={e => (e.currentTarget.style.color = "var(--icon-hover)")}
+                onMouseLeave={e => (e.currentTarget.style.color = "var(--icon-color)")}
               ><Paperclip size={17} /></button>
-              <button type="button" style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: "5px", borderRadius: "6px" }}
-                onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-                onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.3)")}
+              <button type="button" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "5px", borderRadius: "6px" }}
+                onMouseEnter={e => (e.currentTarget.style.color = "var(--icon-hover)")}
+                onMouseLeave={e => (e.currentTarget.style.color = "var(--icon-color)")}
               ><Smile size={17} /></button>
             </div>
             <button
@@ -264,7 +342,7 @@ export default function DMPage() {
             </button>
           </div>
         </div>
-        <p style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.2)", marginTop: "6px", textAlign: "center" }}>
+        <p style={{ fontSize: "0.72rem", color: "var(--text-faint)", marginTop: "6px", textAlign: "center" }}>
           Enter to send · Shift+Enter for new line
         </p>
       </div>
