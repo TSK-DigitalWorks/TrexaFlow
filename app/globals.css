@@ -49,6 +49,7 @@ body {
   --accent:           #E01E5A;
   --unread-dot:       #4ade80;
   --divider:          rgba(255,255,255,0.06);
+  --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
 }
 
 /* ── Light Theme ── */
@@ -77,6 +78,7 @@ body {
   --accent:           #E01E5A;
   --unread-dot:       #16a34a;
   --divider:          rgba(0,0,0,0.07);
+  --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
 }
 
 /* ── System Default ── */
@@ -106,6 +108,7 @@ body {
     --accent:           #E01E5A;
     --unread-dot:       #16a34a;
     --divider:          rgba(0,0,0,0.07);
+    --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
   }
 }
 
@@ -125,4 +128,9 @@ body {
 @keyframes fadeSlideDown {
   from { opacity: 0; transform: translateY(-6px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmerBar {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
