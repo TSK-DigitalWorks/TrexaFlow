@@ -409,12 +409,12 @@ export default function OnboardingPage() {
             {/* Job Title */}
             <div style={{ marginBottom: "24px" }}>
               <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
-                Job Title / Role <span style={{ color: "#E01E5A" }}>*</span>
+                Job Title / Designation <span style={{ color: "#E01E5A" }}>*</span>
               </label>
               <div style={{ position: "relative" }}>
                 <Briefcase size={15} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.25)" }} />
                 <input
-                  type="text" placeholder="e.g. Product Designer" value={jobTitle}
+                  type="text" placeholder="e.g. Product Designer, Software Engineer" value={jobTitle}
                   onChange={e => setJobTitle(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && handleSaveProfile()}
                   style={{
