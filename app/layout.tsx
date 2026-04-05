@@ -1,8 +1,5 @@
 import type { Metadata } from "next";
-import { Geist } from "next/font/google";
 import "./globals.css";
-
-const geist = Geist({ subsets: ["latin"], variable: "--font-geist-sans" });
 
 export const metadata: Metadata = {
   title: "TrexaFlow",
@@ -11,8 +8,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={geist.variable} data-scroll-behavior="smooth">
-      <body>{children}</body>
+    <html lang="en" data-scroll-behavior="smooth">
+      <body style={{ margin: 0, padding: 0, fontFamily: 'Inter, system-ui, -apple-system, sans-serif' }}>
+        {children}
+      </body>
     </html>
   );
 }
