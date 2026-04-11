@@ -1,0 +1,25 @@
+2212: if (!workspace?.workspace_code) return;
+2226: if (!me || !profileEditName.trim()) return;
+2230: if (!user) { setSavingProfile(false); return; }
+2264: if (!workspace || !wsEditName.trim()) return;
+2312: if (error) { setCreatingChannel(false); return; }
+2350: if (!newChannelName.trim() || creatingChannel || !me || !workspace) return;
+2357: if (!activeChannel || !me || activeChannel.is_default) return;
+2376: if (!activeChannel || !editChannelName.trim()) return;
+2399: if (!activeChannel || activeChannel.is_default) return;
+2410: if (!activeChannel) return;
+2420: if (!activeChannel) return;
+2429: if (!me) return;
+2438: if (!me) return;
+2581: if (!editorEl) return;
+2626: if (!linkModalUrl.trim()) return;
+2630: if (!editorEl) return;
+2676: if (type === 'image') return (
+2811: if (!text) return null;
+2951: if (!content) return null;
+2981: if (loading || checking) return (
+2992: if (!el) return;
+3068: if (!toast) return null;
+3125: if (mentionQuery === null || mentionDropdownFor !== type || mentionMembers.length === 0) return null;
+3229: if (taskFilter === 'all') return true;
+3230: if (taskFilter === 'task' || taskFilter === 'milestone') return t.type === taskFilter;
