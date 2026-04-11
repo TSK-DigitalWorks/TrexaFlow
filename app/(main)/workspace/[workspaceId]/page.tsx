@@ -7,7 +7,8 @@ import {
   MessageSquare, Globe, Plus, ChevronDown, LogOut,
   Send, Paperclip, Settings, Users, Lock, X, Check,
   Loader2, MoreHorizontal, Pin, User, Copy, Sun, Moon,
-  Monitor, Pencil, Trash2, Upload, MailOpen, Smile,
+  Monitor, Pencil, Trash2, Upload, MailOpen, Smile, CheckSquare, Calendar,
+  LayoutDashboard, Milestone, CheckSquare2, ClipboardList, Flag, UserPlus, RefreshCcw, CheckCircle2, ExternalLink,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useRequireAuth } from "@/lib/useAuth";
@@ -48,7 +49,20 @@ type Message = {
   attachment_name?: string | null;
   attachment_type?: string | null;
   parent_message_id?: string | null;
-  parent_snapshot?: { senderName: string; content: string } | null;
+  parent_snapshot?: { sendername: string; content: string } | null;
+  event_meta?: {
+    eventtype: 'taskassigned' | 'tasksubmitted' | 'taskchangesrequested' | 'taskcompleted';
+    taskid: string;
+    tasktitle: string;
+    tasktype: 'task' | 'milestone';
+    taskdescription?: string | null;
+    assignedtoname?: string;
+    assignedbyname?: string;
+    note?: string;
+    submissionurl?: string | null;
+    submissionfilename?: string | null;
+  } | null;
+  project_id?: string | null;
 };
 type Member = {
   user_id: string;
@@ -66,10 +80,85 @@ type DM = {
   attachment_name?: string | null;
   attachment_type?: string | null;
   parent_message_id?: string | null;
-  parent_snapshot?: { senderName: string; content: string } | null;
+  parent_snapshot?: { sendername: string; content: string } | null;
 };
+
+type Project = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description?: string | null;
+  color: string;
+  created_by: string;
+  is_private: boolean;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+type ProjectMember = {
+  id: string;
+  project_id: string;
+  user_id: string;
+  role: string;
+  joined_at: string;
+  profile?: Profile | null;
+};
+
+type ProjectMessage = {
+  id: string;
+  project_id: string;
+  sender_id: string;
+  content: string;
+  attachment_url?: string | null;
+  attachment_name?: string | null;
+  attachment_type?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  is_edited?: boolean;
+  sender?: Profile | null;
+};
+
+type TaskType = 'task' | 'milestone';
+
+type TaskStatus =
+  | 'open'
+  | 'active'
+  | 'in_review'
+  | 'changes_requested'
+  | 'complete';
+
+type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
+
+type ProjectTask = {
+  id: string;
+  project_id: string;
+  created_by: string;
+  assignee_id?: string | null;
+  type: TaskType;
+  title: string;
+  description?: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  due_date?: string | null;
+  submission_text?: string | null;
+  submission_url?: string | null;
+  submission_filename?: string | null;
+  submitted_at?: string | null;
+  revision_note?: string | null;
+  revision_count: number;
+  completed_by?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  assignee?: Profile | null;
+  // Attachment fields
+  attachment_url?: string | null;
+  attachment_name?: string | null;
+  attachment_type?: string | null;
+};
+
 type ThemeMode = "system" | "dark" | "light";
-type View = "channel" | "dm";
+type View = "channel" | "dm" | "project";
 
 const cleanPastedHtml = (node: HTMLElement): string => {
   const processNode = (n: Node): string => {
@@ -228,9 +317,32 @@ async function handleAttachPick(
   setPreview(file.type.startsWith('image/') ? URL.createObjectURL(file) : null);
 }
 
+function TaskTypeIcon({
+  type,
+  size = 16,
+}: {
+  type: 'task' | 'milestone';
+  size?: number;
+}) {
+  if (type === 'milestone') {
+    return (
+      <Milestone
+        size={size}
+        style={{ color: '#7c3aed', flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <CheckSquare2
+      size={size}
+      style={{ color: '#3b82f6', flexShrink: 0 }}
+    />
+  );
+}
+
 // ─── Component ───────────────────────────────────────────
 export default function WorkspacePage() {
-  const { checking } = useRequireAuth();
+  const { checking, userId } = useRequireAuth();
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -334,6 +446,106 @@ export default function WorkspacePage() {
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
   const [showThemePicker, setShowThemePicker] = useState(false);
+
+  // Sidebar section collapse state
+  const [sidebarChannelsOpen, setSidebarChannelsOpen] = useState(true);
+  const [sidebarDmsOpen, setSidebarDmsOpen] = useState(true);
+  const [sidebarProjectsOpen, setSidebarProjectsOpen] = useState(true);
+
+  // Projects state
+  const [projects, setProjects] = useState<Project[]>([]);
+  // Project chat unread counts (per project, loaded from DB or realtime)
+  const [projectChatUnread, setProjectChatUnread] = useState<Record<string, number>>({});
+
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(false);
+
+  // Create project modal
+  const [showCreateProject, setShowCreateProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectDesc, setNewProjectDesc] = useState("");
+  const [newProjectColor, setNewProjectColor] = useState("#E01E5A");
+  const [newProjectIsPrivate, setNewProjectIsPrivate] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
+
+  // Project settings modal
+  const [showProjectSettings, setShowProjectSettings] = useState(false);
+  const [editProjectName, setEditProjectName] = useState("");
+  const [editProjectDesc, setEditProjectDesc] = useState("");
+  const [editProjectColor, setEditProjectColor] = useState("#E01E5A");
+  const [savingProject, setSavingProject] = useState(false);
+  const [showDeleteProjectConfirm, setShowDeleteProjectConfirm] = useState(false);
+  const [projectSettingsTab, setProjectSettingsTab] = useState<'about' | 'members'>('about');
+  const [nonProjectMembers, setNonProjectMembers] = useState<Member[]>([]);
+
+  // Project tasks state
+  const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [showNewTaskInline, setShowNewTaskInline] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+
+  // Task detail panel
+  const [activeTask, setActiveTask] = useState<ProjectTask | null>(null);
+  const [showTaskPanel, setShowTaskPanel] = useState(false);
+  const [taskFilter, setTaskFilter] = useState<'all' | 'task' | 'milestone' | TaskStatus>('all');
+
+  // Create task/milestone modal
+  const [showCreateTask, setShowCreateTask] = useState(false);
+  const [newTaskType, setNewTaskType] = useState<TaskType>('task');
+  const [newTaskDesc, setNewTaskDesc] = useState('');
+  const [newTaskPriority, setNewTaskPriority] = useState<TaskPriority>('medium');
+  const [newTaskAssigneeId, setNewTaskAssigneeId] = useState('');
+  const [newTaskDueDate, setNewTaskDueDate] = useState('');
+  const [creatingTask, setCreatingTask] = useState(false);
+
+  // Milestone submit / revision
+  const [submittingTask, setSubmittingTask] = useState(false);
+  const [submitText, setSubmitText] = useState('');
+  const [submitFile, setSubmitFile] = useState<File | null>(null);
+  const [submitBytes, setSubmitBytes] = useState<ArrayBuffer | null>(null);
+  const [submitPreview, setSubmitPreview] = useState<string | null>(null);
+  const [revisionNote, setRevisionNote] = useState('');
+  const [showRevisionInput, setShowRevisionInput] = useState(false);
+  const [editingDescription, setEditingDescription] = useState(false);
+  const [descriptionDraft, setDescriptionDraft] = useState('');
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const submitFileInputRef = useRef<HTMLInputElement>(null);
+
+
+
+  // For file attachment in Create Task modal
+  const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
+  const [newTaskBytes, setNewTaskBytes] = useState<ArrayBuffer | null>(null);
+  const newTaskFileInputRef = useRef<HTMLInputElement>(null);
+
+
+  // Project chat state
+  const [projectTab, setProjectTab] = useState<'overview' | 'chat'>('overview');
+  const [projectMessages, setProjectMessages] = useState<ProjectMessage[]>([]);
+  const [projectMsgLoading, setProjectMsgLoading] = useState(false);
+  const [projectNewMessage, setProjectNewMessage] = useState('');
+  const projectNewMessageRef = useRef<string>('');
+  const [isProjectEditorEmpty, setIsProjectEditorEmpty] = useState(true);
+  const [projectSending, setProjectSending] = useState(false);
+  const [projectEditingId, setProjectEditingId] = useState<string | null>(null);
+  const [projectEditingContent, setProjectEditingContent] = useState('');
+  const [projectHoveredId, setProjectHoveredId] = useState<string | null>(null);
+  const [projectOpenMenuId, setProjectOpenMenuId] = useState<string | null>(null);
+  const [projectAttachFile, setProjectAttachFile] = useState<File | null>(null);
+  const [projectAttachBytes, setProjectAttachBytes] = useState<ArrayBuffer | null>(null);
+  const [projectAttachPreview, setProjectAttachPreview] = useState<string | null>(null);
+  const [projectUploading, setProjectUploading] = useState(false);
+  const projectMessagesEndRef = useRef<HTMLDivElement>(null);
+  const projectMessagesContainerRef = useRef<HTMLDivElement>(null);
+  const projectEditorRef = useRef<HTMLDivElement>(null);
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
+  const projectSubRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const projectTaskSubRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const projectsRealtimeSubRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
+
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [unreadFromMessageId, setUnreadFromMessageId] = useState<string | null>(null);
@@ -346,6 +558,19 @@ export default function WorkspacePage() {
   const [linkModalText, setLinkModalText] = useState("");
   const [linkModalUrl, setLinkModalUrl] = useState("");
   const [linkModalTarget, setLinkModalTarget] = useState<"channel" | "dm">("channel");
+
+  // ── Workspace Switching & Creation ──
+  const [myWorkspaces, setMyWorkspaces] = useState<Workspace[]>([]);
+  const [showWorkspaceSwitcher, setShowWorkspaceSwitcher] = useState(false);
+  const [showAddWorkspace, setShowAddWorkspace] = useState(false);
+  const workspaceSwitcherRef = useRef<HTMLDivElement>(null);
+  const projectTabRef = useRef<'overview' | 'chat'>('overview');
+
+  const [addWsMode, setAddWsMode] = useState<'create' | 'join'>('join');
+  const [addWsName, setAddWsName] = useState('');
+  const [addWsJoinCode, setAddWsJoinCode] = useState('');
+  const [addWsLoading, setAddWsLoading] = useState(false);
+  const [addWsError, setAddWsError] = useState('');
 
   // ── Refs ──
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -374,7 +599,7 @@ export default function WorkspacePage() {
 
   // ── Reply state ──
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
-  const [dmReplyingTo, setDmReplyingTo] = useState<DM & { senderName?: string } | null>(null);
+  const [dmReplyingTo, setDmReplyingTo] = useState<DM & { sendername?: string } | null>(null);
 
   const showToast = (message: string, type: 'error' | 'success' | 'info' = 'error') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -382,27 +607,34 @@ export default function WorkspacePage() {
     toastTimerRef.current = setTimeout(() => setToast(null), 4000);
   };
 
+  useEffect(() => {
+    if (me) loadProjectUnreadCounts();
+  }, [me?.id]);
+
+
   // ─── useEffects ──────────────────────────────────────────
 
   useEffect(() => {
+    if (checking || !userId) return;
     let cleanup: (() => void) | undefined;
-    init().then(fn => { cleanup = fn as (() => void) | undefined; });
+    init(userId).then(fn => { cleanup = fn as (() => void) | undefined; });
     return () => {
       cleanup?.();
-      if (dmSubRef.current) {
-        supabase.removeChannel(dmSubRef.current);
-        dmSubRef.current = null;
-      }
-      if (allDmSubRef.current) {
-        supabase.removeChannel(allDmSubRef.current);
-        allDmSubRef.current = null;
-      }
+      if (dmSubRef.current) { supabase.removeChannel(dmSubRef.current); dmSubRef.current = null; }
+      if (allDmSubRef.current) { supabase.removeChannel(allDmSubRef.current); allDmSubRef.current = null; }
+      if (projectSubRef.current) { supabase.removeChannel(projectSubRef.current); projectSubRef.current = null; }
+      if (projectTaskSubRef.current) { supabase.removeChannel(projectTaskSubRef.current); projectTaskSubRef.current = null; }
+      if (projectsRealtimeSubRef.current) { supabase.removeChannel(projectsRealtimeSubRef.current); projectsRealtimeSubRef.current = null; }
     };
-  }, [workspaceId]);
+  }, [workspaceId, checking, userId]);
 
   useEffect(() => {
     if (activeChannel) loadChannelMembers();
   }, [activeChannel]);
+
+  useEffect(() => {
+    if (activeProject) loadProjectMembers(activeProject.id);
+  }, [activeProject?.id]);
 
   useEffect(() => {
     activeChannelRef.current = activeChannel;
@@ -423,6 +655,40 @@ export default function WorkspacePage() {
     const saved = (localStorage.getItem("trexaflow_theme") as ThemeMode) || "dark";
     setThemeMode(saved);
     applyTheme(saved);
+  }, []);
+
+  // Load sidebar collapse state
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const saved = localStorage.getItem('trexaflow-sidebar-collapse');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed.channels === 'boolean') setSidebarChannelsOpen(parsed.channels);
+        if (typeof parsed.dms === 'boolean') setSidebarDmsOpen(parsed.dms);
+        if (typeof parsed.projects === 'boolean') setSidebarProjectsOpen(parsed.projects);
+      } catch { }
+    }
+  }, []);
+
+  // Scroll to bottom when switching to project chat tab
+  useEffect(() => {
+    if ((view as string) === 'project' && projectTab === 'chat' && projectMessages.length > 0) {
+      setTimeout(() => {
+        if (projectMessagesContainerRef.current)
+          projectMessagesContainerRef.current.scrollTop = projectMessagesContainerRef.current.scrollHeight;
+      }, 80);
+    }
+  }, [projectTab, (view as string) === 'project']);
+
+  // Close project message menu on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node))
+        setProjectOpenMenuId(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
   }, []);
 
   // DM unread counts from localStorage
@@ -584,33 +850,770 @@ export default function WorkspacePage() {
     setRefreshingMembers(false);
   };
 
-  // ─── init ────────────────────────────────────────────────
-  const init = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.user) return router.replace("/auth");
-    const user = session.user;
+  // Load all projects for this workspace
+  const loadProjects = async (userId?: string) => {
+    const uid = userId ?? me?.id;
+    if (!uid) return;
+    setLoadingProjects(true);
+    const { data } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .order("created_at");
+    setProjects(data ?? []);
+    setLoadingProjects(false);
+  };
 
-    meIdRef.current = user.id;
+  const subscribeToWorkspaceProjects = (userId: string) => {
+    if (projectsRealtimeSubRef.current) {
+      supabase.removeChannel(projectsRealtimeSubRef.current);
+      projectsRealtimeSubRef.current = null;
+    }
+
+    const sub = supabase
+      .channel('workspace-projects-' + workspaceId)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'projects', filter: `workspace_id=eq.${workspaceId}` },
+        async (payload: any) => {
+          const proj = payload.new as Project;
+          // For private projects, check if we're a member before adding
+          if (proj.is_private) {
+            const { data: membership } = await supabase
+              .from('project_members')
+              .select('id')
+              .eq('project_id', proj.id)
+              .eq('user_id', userId)
+              .single();
+            if (!membership) return;
+          }
+          setProjects(prev => prev.find(p => p.id === proj.id) ? prev : [...prev, proj]);
+        }
+      )
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `workspace_id=eq.${workspaceId}` },
+        (payload: any) => {
+          const updated = payload.new as Project;
+          setProjects(prev => prev.map(p => p.id === updated.id ? { ...p, ...updated } : p));
+          setActiveProject(prev => prev?.id === updated.id ? { ...prev, ...updated } : prev);
+        }
+      )
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'projects' },
+        (payload: any) => {
+          const deletedId = (payload.old as any).id;
+          setProjects(prev => prev.filter(p => p.id !== deletedId));
+          if (activeProject?.id === deletedId) {
+            setActiveProject(null);
+            setView('channel' as any);
+          }
+        }
+      )
+      .subscribe();
+
+    projectsRealtimeSubRef.current = sub;
+  };
+
+  // Load members of a project
+  const loadProjectMembers = async (projectId: string) => {
+    const { data: pms } = await supabase
+      .from("project_members")
+      .select("*")
+      .eq("project_id", projectId);
+    if (!pms) return;
+    const withProfiles = await Promise.all(
+      pms.map(async (pm: any) => {
+        const { data: p } = await supabase.from("users").select("*").eq("id", pm.user_id).single();
+        return { ...pm, profile: p };
+      })
+    );
+    setProjectMembers(withProfiles);
+    const memberIds = withProfiles.map((pm: any) => pm.user_id);
+    setNonProjectMembers(members.filter(m => !memberIds.includes(m.user_id)));
+  };
+
+  // Open a project (switch to project view)
+  const openProject = async (project: Project) => {
+    // Clean up previous project subscriptions
+    if (projectSubRef.current) {
+      supabase.removeChannel(projectSubRef.current);
+      projectSubRef.current = null;
+    }
+    if (projectTaskSubRef.current) {
+      supabase.removeChannel(projectTaskSubRef.current);
+      projectTaskSubRef.current = null;
+    }
+
+    setActiveProject(project);
+    setView('project' as any);
+    setActiveChannel(null);
+    setActiveDmUserId(null);
+    setActiveDmUser(null);
+    switchProjectTab('overview');
+    setProjectMessages([]);
+    await loadProjectMembers(project.id);
+    await loadProjectMessages(project.id);
+    await loadProjectTasks(project.id);
+    subscribeToProjectTasks(project.id);
+    subscribeToProjectMessages(project.id);
+    // Clear sidebar badge immediately on open
+    setProjectChatUnread(prev => ({ ...prev, [project.id]: 0 }));
+    // Clear badge when opening project (overview tab is shown first, but mark read anyway)
+    markProjectChatRead(project.id);
+  };
+
+
+
+  // Create project (now with is_private + DB trigger handles member auto-add)
+  const createProject = async () => {
+    if (!newProjectName.trim() || !me) return;
+    setCreatingProject(true);
+
+    const { data: proj, error } = await supabase
+      .from('projects')
+      .insert({
+        workspace_id: workspaceId,
+        name: newProjectName.trim(),
+        description: newProjectDesc.trim() || null,
+        color: newProjectColor,
+        created_by: me.id,
+        is_private: newProjectIsPrivate,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      showToast('Failed to create project', 'error');
+      setCreatingProject(false);
+      return;
+    }
+
+    // For private: only creator added (as admin)
+    // For public: DB trigger already added all workspace members, upgrade creator to admin
+    await supabase
+      .from('project_members')
+      .upsert({ project_id: proj.id, user_id: me.id, role: 'admin' }, { onConflict: 'project_id,user_id' });
+
+    setProjects((prev) => [...prev, proj]);
+    setNewProjectName('');
+    setNewProjectDesc('');
+    setNewProjectColor('#E01E5A');
+    setNewProjectIsPrivate(false);
+    setShowCreateProject(false);
+    setCreatingProject(false);
+    showToast(`Project "${proj.name}" created!`, 'success');
+    await openProject(proj);
+  };
+
+  // Save project settings edits
+  const saveProjectEdit = async () => {
+    if (!activeProject || !editProjectName.trim()) return;
+    setSavingProject(true);
+    const { data: updated } = await supabase
+      .from("projects")
+      .update({
+        name: editProjectName.trim(),
+        description: editProjectDesc.trim() || null,
+        color: editProjectColor,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", activeProject.id)
+      .select()
+      .single();
+    if (updated) {
+      setProjects(prev => prev.map(p => p.id === updated.id ? updated : p));
+      setActiveProject(updated);
+    }
+    setSavingProject(false);
+    setShowProjectSettings(false);
+  };
+
+  // Delete project
+  const deleteProject = async () => {
+    if (!activeProject) return;
+    await supabase.from("projects").delete().eq("id", activeProject.id);
+    setProjects(prev => prev.filter(p => p.id !== activeProject.id));
+    setActiveProject(null);
+    setView("channel");
+    const defaultCh = channels.find(c => c.is_default) ?? channels[0];
+    if (defaultCh) switchChannel(defaultCh);
+    setShowProjectSettings(false);
+    setShowDeleteProjectConfirm(false);
+    showToast("Project deleted", "info");
+  };
+
+  // Add member to project
+  const addProjectMember = async (userId: string) => {
+    if (!activeProject) return;
+    await supabase.from("project_members").insert({ project_id: activeProject.id, user_id: userId, role: "member" });
+    await loadProjectMembers(activeProject.id);
+  };
+
+  // Remove member from project
+  const removeProjectMember = async (userId: string) => {
+    if (!activeProject) return;
+    await supabase.from("project_members").delete().eq("project_id", activeProject.id).eq("user_id", userId);
+    await loadProjectMembers(activeProject.id);
+  };
+
+  // Load project messages
+  const loadProjectMessages = async (projectId: string) => {
+    setProjectMsgLoading(true);
+    const { data } = await supabase
+      .from('messages')
+      .select('*, sender:users(*)')
+      .eq('project_id', projectId)
+      .order('created_at');
+    setProjectMessages(data ?? []);
+    setProjectMsgLoading(false);
+    setTimeout(() => {
+      if (projectMessagesContainerRef.current)
+        projectMessagesContainerRef.current.scrollTop = projectMessagesContainerRef.current.scrollHeight;
+    }, 60);
+  };
+
+  // Subscribe to realtime project messages
+  const subscribeToProjectMessages = (projectId: string) => {
+    if (projectSubRef.current) {
+      supabase.removeChannel(projectSubRef.current);
+      projectSubRef.current = null;
+    }
+
+    const sub = supabase
+      .channel('project-chat-' + projectId)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `project_id=eq.${projectId}` },
+        async (payload: any) => {
+          const msg = payload.new as any;
+
+          // Fetch sender for non-system messages sent by others
+          let senderProfile = null;
+          if (msg.sender_id !== me?.id) {
+            const { data: sender } = await supabase.from('users').select('*').eq('id', msg.sender_id).single();
+            senderProfile = sender;
+          } else {
+            senderProfile = me;
+          }
+
+          setProjectMessages(prev => {
+            if (prev.find(m => m.id === msg.id)) return prev; // dedup
+            return [...prev, { ...msg, sender: senderProfile }];
+          });
+
+          setTimeout(() => {
+            if (projectMessagesContainerRef.current) {
+              projectMessagesContainerRef.current.scrollTop = projectMessagesContainerRef.current.scrollHeight;
+            }
+          }, 50);
+
+          // Badge: if user is on this project but NOT on the chat tab, increment unread
+          // Also badge sidebar if user is on a different project entirely
+          const isViewingThisProjectChat =
+            (view as string) === 'project' &&
+            activeProject?.id === projectId &&
+            projectTab === 'chat';
+
+          if (!isViewingThisProjectChat && msg.sender_id !== me?.id) {
+            setProjectChatUnread(prev => ({
+              ...prev,
+              [projectId]: (prev[projectId] ?? 0) + 1,
+            }));
+          }
+        }
+      )
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `project_id=eq.${projectId}` },
+        (payload: any) => {
+          const updated = payload.new as any;
+          setProjectMessages(prev => prev.map(m => m.id === updated.id ? { ...m, ...updated } : m));
+        }
+      )
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' },
+        (payload: any) => {
+          setProjectMessages(prev => prev.filter(m => m.id !== (payload.old as any).id));
+        }
+      )
+      .subscribe();
+
+    projectSubRef.current = sub;
+  };
+
+  // Send project message
+  const sendProjectMessage = async () => {
+    const editorEl = projectEditorRef.current;
+    if (!editorEl || !me || !activeProject || projectSending || projectUploading) return;
+  
+    const html = editorEl.innerHTML;
+    const content = sanitizeHtml(html);
+    if (!content.trim() && !projectAttachFile) return;
+  
+    editorEl.innerHTML = '';
+    projectNewMessageRef.current = '';
+    setIsProjectEditorEmpty(true);
+    setProjectNewMessage('');
+    setProjectSending(true);
+  
+    let attachData: { url: string; name: string; type: 'image' | 'file' } | null = null;
+    if (projectAttachFile && projectAttachBytes) {
+      setProjectUploading(true);
+      attachData = await uploadToCloudinary(projectAttachFile, projectAttachBytes, showToast);
+      setProjectUploading(false);
+      if (!attachData) {
+        editorEl.innerHTML = html;
+        setProjectSending(false);
+        setProjectAttachFile(null); setProjectAttachBytes(null); setProjectAttachPreview(null);
+        return;
+      }
+      setProjectAttachFile(null); setProjectAttachBytes(null); setProjectAttachPreview(null);
+    }
+  
+    const optimisticId = `opt-${Date.now()}`;
+    const optimistic = {
+      id: optimisticId,
+      project_id: activeProject.id,       // ✅ was: projectid
+      sender_id: me.id,                   // ✅ was: senderid
+      content: content.trim() || null,
+      attachment_url: attachData?.url ?? null,   // ✅ was: attachmenturl
+      attachment_name: attachData?.name ?? null, // ✅ was: attachmentname
+      attachment_type: attachData?.type ?? null, // ✅ was: attachmenttype
+      created_at: new Date().toISOString(),      // ✅ was: createdat
+      sender: me,
+    } as any;
+    setProjectMessages((prev) => [...prev, optimistic]);
+    setTimeout(() => {
+      if (projectMessagesContainerRef.current)
+        projectMessagesContainerRef.current.scrollTop = projectMessagesContainerRef.current.scrollHeight;
+    }, 50);
+  
+    const { data: inserted } = await supabase
+      .from('messages')                    // ✅ was: projectmessages
+      .insert({
+        project_id: activeProject.id,
+        sender_id: me.id,
+        channel_id: null,
+        content: content.trim() || '',
+        is_pinned: false,
+        is_system: false,
+        attachment_url: attachData?.url ?? null,
+        attachment_name: attachData?.name ?? null,
+        attachment_type: attachData?.type ?? null,
+      })
+      .select('*, sender:users(*)')
+      .single();
+  
+    if (inserted) {
+      setProjectMessages((prev) =>
+        prev.map((m) => m.id === optimisticId ? inserted : m)
+      );
+    }
+    setProjectSending(false);
+  };
+
+  // Edit project message
+  const saveProjectChatMessage = async () => {
+    if (!projectEditingId || !projectEditingContent.trim()) return;
+    const content = sanitizeHtml(projectEditingContent);
+    await supabase
+      .from('messages')                    // ✅ was: projectmessages
+      .update({ content, is_edited: true, updated_at: new Date().toISOString() }) // ✅ was: isedited, updatedat
+      .eq('id', projectEditingId);
+    setProjectMessages((prev) =>
+      prev.map((m) => m.id === projectEditingId ? { ...m, content, is_edited: true } : m)
+    );
+    setProjectEditingId(null);
+    setProjectEditingContent('');
+  };
+
+  // Delete project message
+  const deleteProjectChatMessage = async (id: string) => {
+    await supabase.from('messages').delete().eq('id', id); // ✅ was: projectmessages
+    setProjectMessages((prev) => prev.filter((m) => m.id !== id));
+    setProjectOpenMenuId(null);
+  };
+
+  // Helper: post system event card to project discussions
+  const postTaskEvent = async (
+    projectid: string,
+    eventtype: 'taskassigned' | 'tasksubmitted' | 'taskchangesrequested' | 'taskcompleted',
+    task: ProjectTask,
+    extra?: {
+      note?: string;
+      submissionurl?: string;
+      submissionfilename?: string;
+      assignedtoname?: string;
+      assignedbyname?: string;
+    }
+  ) => {
+    const { error } = await supabase.from('messages').insert({
+      project_id: projectid,
+      channel_id: null,
+      sender_id: me!.id,
+      content: eventtype,          // non-empty string satisfies NOT NULL
+      is_pinned: false,
+      is_system: true,
+      event_meta: {
+        eventtype,
+        taskid: task.id,
+        tasktitle: task.title,
+        tasktype: task.type,
+        taskdescription: task.description ?? null,
+        assignedtoname: extra?.assignedtoname ?? task.assignee?.full_name ?? '',
+        assignedbyname: extra?.assignedbyname ?? me?.full_name ?? '',
+        note: extra?.note ?? null,
+        submissionurl: extra?.submissionurl ?? null,
+        submissionfilename: extra?.submissionfilename ?? null,
+      },
+    });
+    if (error) console.error('postTaskEvent failed:', error.message);
+  };
+
+  const switchProjectTab = (tab: 'overview' | 'chat') => {
+    projectTabRef.current = tab;
+    setProjectTab(tab);
+    if (tab === 'chat' && activeProject) {
+      markProjectChatRead(activeProject.id);
+    }
+  };
+
+
+  // Mark project chat as read for current user — call when opening chat tab
+  const markProjectChatRead = async (projectId: string) => {
+    if (!me) return;
+    await supabase
+      .from('project_chat_reads')
+      .upsert(
+        { project_id: projectId, user_id: me.id, last_read_at: new Date().toISOString() },
+        { onConflict: 'project_id,user_id' }
+      );
+    setProjectChatUnread(prev => ({ ...prev, [projectId]: 0 }));
+  };
+
+  // Load unread counts for all projects the user is a member of
+  const loadProjectUnreadCounts = async () => {
+    if (!me) return;
+
+    // Get all projects user is in
+    const { data: memberships } = await supabase
+      .from('project_members')
+      .select('project_id')
+      .eq('user_id', me.id);
+    if (!memberships?.length) return;
+
+    const projectIds = memberships.map((m: any) => m.project_id);
+
+    // Get last read timestamps for this user
+    const { data: reads } = await supabase
+      .from('project_chat_reads')
+      .select('project_id, last_read_at')
+      .eq('user_id', me.id)
+      .in('project_id', projectIds);
+
+    const readMap: Record<string, string> = {};
+    reads?.forEach((r: any) => { readMap[r.project_id] = r.last_read_at; });
+
+    // For each project, count messages newer than last_read_at
+    const counts: Record<string, number> = {};
+    await Promise.all(
+      projectIds.map(async (pid: string) => {
+        const lastRead = readMap[pid];
+        let query = supabase
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('project_id', pid);
+        if (lastRead) {
+          query = query.gt('created_at', lastRead);
+        }
+        const { count } = await query;
+        counts[pid] = count ?? 0;
+      })
+    );
+    setProjectChatUnread(counts);
+  };
+
+
+  // Load tasks for a project
+  const loadProjectTasks = async (projectId: string) => {
+    setLoadingTasks(true);
+    const { data } = await supabase
+      .from('tasks')
+      .select('*, assignee:users!tasks_assignee_id_fkey(*)')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false });
+    setProjectTasks((data as ProjectTask[]) ?? []);
+    setLoadingTasks(false);
+  };
+
+  // Subscribe to realtime task changes
+  const subscribeToProjectTasks = (projectId: string) => {
+    // Cleanup any previous subscription
+    if (projectTaskSubRef.current) {
+      supabase.removeChannel(projectTaskSubRef.current);
+      projectTaskSubRef.current = null;
+    }
+
+    const sub = supabase
+      .channel('tasks-' + projectId)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks', filter: `project_id=eq.${projectId}` },
+        async (payload: any) => {
+          if (payload.eventType === 'INSERT') {
+            const t = payload.new as ProjectTask;
+            let withAssignee = t;
+            if (t.assignee_id) {
+              const { data: a } = await supabase.from('users').select('*').eq('id', t.assignee_id).single();
+              if (a) withAssignee = { ...t, assignee: a };
+            }
+            setProjectTasks(prev =>
+              prev.find(x => x.id === t.id) ? prev : [withAssignee, ...prev]
+            );
+          }
+          if (payload.eventType === 'UPDATE') {
+            const t = payload.new as ProjectTask;
+            setProjectTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...t } : x));
+            setActiveTask(prev => prev?.id === t.id ? { ...prev, ...t } : prev);
+          }
+          if (payload.eventType === 'DELETE') {
+            const id = (payload.old as any).id;
+            setProjectTasks(prev => prev.filter(x => x.id !== id));
+            if (activeTask?.id === id) { setActiveTask(null); setShowTaskPanel(false); }
+          }
+        }
+      )
+      .subscribe();
+
+    projectTaskSubRef.current = sub;
+  };
+
+  // Create task or milestone
+  const createProjectTask = async () => {
+    if (!activeProject || !newTaskTitle.trim() || !me) return;
+    setCreatingTask(true);
+
+    // Upload attachment if present
+    let attachUrl: string | null = null;
+    let attachName: string | null = null;
+    let attachType: 'image' | 'file' | null = null;
+    if (newTaskFile && newTaskBytes) {
+      const result = await uploadToCloudinary(newTaskFile, newTaskBytes, showToast);
+      if (!result) { setCreatingTask(false); return; }
+      attachUrl = result.url;
+      attachName = result.name;
+      attachType = result.type;
+    }
+
+    const assigneeMember = projectMembers.find((m: any) => m.user_id === newTaskAssigneeId);
+
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        project_id: activeProject.id,
+        created_by: me.id,
+        type: newTaskType,
+        title: newTaskTitle.trim(),
+        description: newTaskDesc.trim() || null,
+        status: 'open',
+        priority: newTaskPriority,
+        assignee_id: newTaskAssigneeId || null,
+        due_date: newTaskDueDate || null,
+        attachment_url: attachUrl,
+        attachment_name: attachName,
+        attachment_type: attachType,
+      })
+      .select('*, assignee:users!tasks_assignee_id_fkey(*)')
+      .single();
+
+    if (data) {
+      setProjectTasks((prev) => [data as ProjectTask, ...prev]);
+      if (newTaskAssigneeId) {
+        await postTaskEvent(activeProject.id, 'taskassigned', data as ProjectTask, {
+          assignedtoname: assigneeMember?.profile?.full_name ?? '',
+          assignedbyname: me?.full_name ?? '',
+        });
+      }
+      showToast(`${newTaskType === 'milestone' ? 'Milestone' : 'Task'} created!`, 'success');
+    }
+    if (error) showToast('Failed to create: ' + error.message, 'error');
+
+    // Reset all modal state
+    setNewTaskTitle('');
+    setNewTaskDesc('');
+    setNewTaskPriority('medium');
+    setNewTaskAssigneeId('');
+    setNewTaskDueDate('');
+    setNewTaskFile(null);
+    setNewTaskBytes(null);
+    setShowCreateTask(false);
+    setCreatingTask(false);
+  };
+
+  const saveTaskTitle = async () => {
+    if (!activeTask || !titleDraft.trim()) return;
+    const trimmed = titleDraft.trim();
+    const { error } = await supabase
+      .from('tasks')
+      .update({ title: trimmed, updated_at: new Date().toISOString() })
+      .eq('id', activeTask.id);
+    if (!error) {
+      const updated = { ...activeTask, title: trimmed };
+      setActiveTask(updated);
+      setProjectTasks(prev => prev.map(t => t.id === activeTask.id ? updated : t));
+      setEditingTitle(false);
+    }
+  };
+
+  const saveTaskDescription = async () => {
+    if (!activeTask) return;
+    const trimmed = descriptionDraft.trim() || null;
+    const { error } = await supabase
+      .from('tasks')
+      .update({ description: trimmed, updated_at: new Date().toISOString() })
+      .eq('id', activeTask.id);
+    if (!error) {
+      const updated = { ...activeTask, description: trimmed };
+      setActiveTask(updated);
+      setProjectTasks(prev => prev.map(t => t.id === activeTask.id ? updated : t));
+      setEditingDescription(false);
+    }
+  };
+
+  // Update task status
+  const updateTaskStatus = async (taskId: string, newStatus: TaskStatus) => {
+    const task = projectTasks.find((t) => t.id === taskId);
+    if (!task || !activeProject) return;
+
+    const updates: Record<string, any> = {
+      status: newStatus,
+      updated_at: new Date().toISOString(),
+    };
+    if (newStatus === 'complete') {
+      updates.completed_by = me!.id;
+      updates.completed_at = new Date().toISOString();
+    }
+
+    const { error } = await supabase.from('tasks').update(updates).eq('id', taskId);
+    if (!error) {
+      setProjectTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, ...updates } : t)));
+      setActiveTask((prev) => (prev?.id === taskId ? { ...prev, ...updates } : prev));
+      if (newStatus === 'complete') {
+        await postTaskEvent(activeProject.id, 'taskcompleted', { ...task, ...updates } as ProjectTask);
+      }
+    }
+  };
+
+  // Submit milestone work (by assignee)
+  const submitMilestoneWork = async () => {
+    if (!activeTask || !activeProject || !me) return;
+    setSubmittingTask(true);
+
+    let fileUrl: string | null = null;
+    let fileName: string | null = null;
+
+    if (submitFile && submitBytes) {
+      const result = await uploadToCloudinary(submitFile, submitBytes, showToast);
+      if (result) { fileUrl = result.url; fileName = result.name; }
+      else { setSubmittingTask(false); return; } // upload failed, bail
+    }
+
+
+    const updates = {
+      status: 'in_review' as TaskStatus,
+      submission_text: submitText.trim() || null,
+      submission_url: fileUrl,
+      submission_filename: fileName,
+      submitted_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase.from('tasks').update(updates).eq('id', activeTask.id);
+    if (!error) {
+      const updated = { ...activeTask, ...updates };
+      setProjectTasks((prev) => prev.map((t) => (t.id === activeTask.id ? updated : t)));
+      setActiveTask(updated);
+      await postTaskEvent(activeProject.id, 'tasksubmitted', updated, {
+        note: submitText.trim(),
+        submissionurl: fileUrl ?? undefined,
+        submissionfilename: fileName ?? undefined,
+      });
+      setSubmitText('');
+      setSubmitFile(null);
+      setSubmitBytes(null);
+      setSubmitPreview(null);
+
+      showToast('Work submitted for review!', 'success');
+    }
+    setSubmittingTask(false);
+  };
+
+  // Request revision (by admin)
+  const requestTaskRevision = async () => {
+    if (!activeTask || !activeProject || !revisionNote.trim()) return;
+    setSubmittingTask(true);
+
+    const updates = {
+      status: 'changes_requested' as TaskStatus,
+      revision_note: revisionNote.trim(),
+      revision_count: (activeTask.revision_count ?? 0) + 1,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase.from('tasks').update(updates).eq('id', activeTask.id);
+    if (!error) {
+      const updated = { ...activeTask, ...updates };
+      setProjectTasks((prev) => prev.map((t) => (t.id === activeTask.id ? updated : t)));
+      setActiveTask(updated);
+      await postTaskEvent(activeProject.id, 'taskchangesrequested', updated, {
+        note: revisionNote.trim(),
+      });
+      setRevisionNote('');
+      setShowRevisionInput(false);
+      showToast('Changes requested', 'info');
+    }
+    setSubmittingTask(false);
+  };
+
+  // Delete task
+  const deleteProjectTask = async (taskId: string) => {
+    const { error } = await supabase.from('tasks').delete().eq('id', taskId);
+    if (!error) {
+      setProjectTasks((prev) => prev.filter((t) => t.id !== taskId));
+      if (activeTask?.id === taskId) { setActiveTask(null); setShowTaskPanel(false); }
+      showToast('Deleted', 'info');
+    }
+  };
+
+  const loadMyWorkspaces = async (userId: string) => {
+    const { data: memberships } = await supabase
+      .from('workspace_members')
+      .select('workspace_id')
+      .eq('user_id', userId);
+
+    if (!memberships?.length) return;
+    const ids = memberships.map((m: any) => m.workspace_id);
+    const { data: workspaces } = await supabase
+      .from('workspaces')
+      .select()
+      .in('id', ids);
+
+    setMyWorkspaces(workspaces ?? []);
+  };
+
+  // ─── init ────────────────────────────────────────────────
+  const init = async (currentUserId: string) => {
+    meIdRef.current = currentUserId;
 
     const { data: profile } = await supabase
-      .from("users").select("*").eq("id", user.id).single();
+      .from("users").select("*").eq("id", currentUserId).single();
 
     if (!profile?.full_name) return router.replace("/onboarding");
     setMe(profile);
+    await loadMyWorkspaces(currentUserId);
 
     // Verify membership
     const { data: membership } = await supabase
       .from("workspace_members")
       .select("workspace_id")
       .eq("workspace_id", workspaceId)
-      .eq("user_id", user.id)
+      .eq("user_id", currentUserId)
       .single();
 
     if (!membership) {
       const { data: anyMembership } = await supabase
         .from("workspace_members")
         .select("workspace_id")
-        .eq("user_id", user.id)
+        .eq("user_id", currentUserId)
         .limit(1)
         .single();
       if (anyMembership) return router.replace(`/workspace/${anyMembership.workspace_id}`);
@@ -634,7 +1637,7 @@ export default function WorkspacePage() {
     const { data: privateMemberships } = await supabase
       .from("channel_members")
       .select("channel_id")
-      .eq("user_id", user.id);
+      .eq("user_id", currentUserId);
 
     const privateChannelIds = privateMemberships?.map(m => m.channel_id) || [];
     let privateChans: Channel[] = [];
@@ -668,6 +1671,11 @@ export default function WorkspacePage() {
       await loadChannelMessages(targetChannel.id);
     }
 
+    // Load projects
+    await loadProjects(currentUserId);
+    subscribeToWorkspaceProjects(currentUserId);
+    await loadProjectUnreadCounts();
+
     setLoading(false);
 
     // ── Presence channel (shared with DM page — same channel name) ──
@@ -678,7 +1686,7 @@ export default function WorkspacePage() {
     }
 
     const presenceCh = supabase.channel(`presence-workspace-${workspaceId}`, {
-      config: { presence: { key: user.id } },
+      config: { presence: { key: currentUserId } },
     });
 
     presenceCh
@@ -707,7 +1715,7 @@ export default function WorkspacePage() {
       .subscribe(async status => {
         if (status === "SUBSCRIBED") {
           await presenceCh.track({
-            user_id: user.id,
+            user_id: currentUserId,
             full_name: profile?.full_name,
             online_at: new Date().toISOString(),
           });
@@ -735,7 +1743,7 @@ export default function WorkspacePage() {
           // Auto-join public channels
           await supabase.from("channel_members").upsert({
             channel_id: newChan.id,
-            user_id: user.id,
+            user_id: currentUserId,
           }, { onConflict: "channel_id,user_id" });
         } else {
           // For private channels, only show if user is already a member
@@ -743,7 +1751,7 @@ export default function WorkspacePage() {
             .from("channel_members")
             .select("channel_id")
             .eq("channel_id", newChan.id)
-            .eq("user_id", user.id)
+            .eq("user_id", currentUserId)
             .single();
           if (membership) {
             setChannels(prev => {
@@ -848,14 +1856,14 @@ export default function WorkspacePage() {
     }
 
     const allDmSub = supabase
-      .channel(`all-dm-watcher-${user.id}`)
+      .channel(`all-dm-watcher-${currentUserId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "direct_messages",
-          filter: `receiver_id=eq.${user.id}`,
+          filter: `receiver_id=eq.${currentUserId}`,
         },
         payload => {
           const msg = payload.new as DM;
@@ -885,9 +1893,59 @@ export default function WorkspacePage() {
       }, (payload) => {
         const newMember = payload.new as any;
         // Don't mark stale for yourself
-        if (newMember.user_id !== user.id) {
+        if (newMember.user_id !== currentUserId) {
           setMemberListStale(true);
         }
+      })
+      .subscribe();
+
+    // Realtime: watch project updates for this workspace (color, name changes)
+    const projectsRealtime = supabase
+      .channel(`projects-realtime-${workspaceId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'projects',
+        filter: `workspace_id=eq.${workspaceId}`,
+      }, (payload: any) => {
+        const updated = payload.new as Project;
+        // Update the project in the sidebar list
+        setProjects(prev =>
+          prev.map(p => p.id === updated.id ? { ...p, ...updated } : p)
+        );
+        // If this is the currently open project, sync the header too
+        setActiveProject(prev =>
+          prev?.id === updated.id ? { ...prev, ...updated } : prev
+        );
+      })
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'projects',
+        filter: `workspace_id=eq.${workspaceId}`,
+      }, (payload: any) => {
+        const newProject = payload.new as Project;
+        // Only add to sidebar if user is a member (public) or already has access
+        if (!newProject.is_private) {
+          setProjects(prev =>
+            prev.find(p => p.id === newProject.id) ? prev : [...prev, newProject]
+          );
+        }
+      })
+      .on('postgres_changes', {
+        event: 'DELETE',
+        schema: 'public',
+        table: 'projects',
+      }, (payload: any) => {
+        const deletedId = (payload.old as any).id;
+        setProjects(prev => prev.filter(p => p.id !== deletedId));
+        setActiveProject(prev => {
+          if (prev?.id === deletedId) {
+            setView('channel');
+            return null;
+          }
+          return prev;
+        });
       })
       .subscribe();
 
@@ -895,10 +1953,7 @@ export default function WorkspacePage() {
       supabase.removeChannel(msgSub);
       supabase.removeChannel(chanRealtime);
       supabase.removeChannel(memberJoinSub);
-      if (allDmSubRef.current) {
-        supabase.removeChannel(allDmSubRef.current);
-        allDmSubRef.current = null;
-      }
+      supabase.removeChannel(projectsRealtime);
     };
   };
 
@@ -1071,7 +2126,7 @@ export default function WorkspacePage() {
       attachment_type: attachData?.type ?? null,
       parent_message_id: replyingTo?.id ?? null,
       parent_snapshot: replyingTo ? {
-        senderName: replyingTo.sender?.full_name ?? 'Unknown',
+        sendername: replyingTo.sender?.full_name ?? 'Unknown',
         content: replyingTo.content,
       } : null,
     };
@@ -1082,14 +2137,15 @@ export default function WorkspacePage() {
       .insert({
         channel_id: activeChannel.id,
         sender_id: me.id,
-        content,
+        content: content || '',
         is_pinned: false,
+        is_system: false,
         attachment_url: attachData?.url ?? null,
         attachment_name: attachData?.name ?? null,
         attachment_type: attachData?.type ?? null,
         parent_message_id: replyingTo?.id ?? null,
         parent_snapshot: replyingTo ? {
-          senderName: replyingTo.sender?.full_name ?? 'Unknown',
+          sendername: replyingTo.sender?.full_name ?? 'Unknown',
           content: replyingTo.content,
         } : null,
       })
@@ -1165,7 +2221,7 @@ export default function WorkspacePage() {
       attachment_type: attachData?.type ?? null,
       parent_message_id: dmReplyingTo?.id ?? null,
       parent_snapshot: dmReplyingTo ? {
-        senderName: dmReplyingTo.senderName ?? 'Unknown',
+        sendername: dmReplyingTo.sendername ?? 'Unknown',
         content: dmReplyingTo.content,
       } : null,
     };
@@ -1182,7 +2238,7 @@ export default function WorkspacePage() {
         attachment_type: attachData?.type ?? null,
         parent_message_id: dmReplyingTo?.id ?? null,
         parent_snapshot: dmReplyingTo ? {
-          senderName: dmReplyingTo.senderName ?? 'Unknown',
+          sendername: dmReplyingTo.sendername ?? 'Unknown',
           content: dmReplyingTo.content,
         } : null,
       })
@@ -1469,6 +2525,12 @@ export default function WorkspacePage() {
     setTimeout(() => setCodeCopied(false), 2000);
   };
 
+  const saveSidebarCollapse = (channels: boolean, dms: boolean, projects: boolean) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('trexaflow-sidebar-collapse', JSON.stringify({ channels, dms, projects }));
+    }
+  };
+
   // ─── Save profile edit ────────────────────────────────────
   const saveProfileEdit = async () => {
     if (!me || !profileEditName.trim()) return;
@@ -1681,6 +2743,82 @@ export default function WorkspacePage() {
     await supabase.auth.signOut();
     router.replace("/auth");
   };
+
+  const handleAddWorkspace = async () => {
+    if (!me) return;
+    setAddWsError('');
+    setAddWsLoading(true);
+
+    if (addWsMode === 'join') {
+      // Join by code
+      const { data: ws } = await supabase
+        .from('workspaces')
+        .select()
+        .eq('workspace_code', addWsJoinCode.trim().toUpperCase())
+        .single();
+
+      if (!ws) {
+        setAddWsLoading(false);
+        return setAddWsError('Workspace not found. Check the code and try again.');
+      }
+
+      // Check already a member
+      const { data: existing } = await supabase
+        .from('workspace_members')
+        .select('id')
+        .eq('workspace_id', ws.id)
+        .eq('user_id', me.id)
+        .single();
+
+      if (!existing) {
+        await supabase.from('workspace_members').insert({ workspace_id: ws.id, user_id: me.id, role: 'member' });
+        // Auto-join public channels
+        const { data: pubChans } = await supabase.from('channels').select('id').eq('workspace_id', ws.id).eq('is_private', false);
+        if (pubChans?.length) {
+          await supabase.from('channel_members').insert(pubChans.map(ch => ({ channel_id: ch.id, user_id: me.id })));
+        }
+      }
+
+      setAddWsLoading(false);
+      setShowAddWorkspace(false);
+      router.push(`/workspace/${ws.id}`);
+
+    } else {
+      // Create new workspace
+      if (!addWsName.trim()) {
+        setAddWsLoading(false);
+        return setAddWsError('Please enter a workspace name.');
+      }
+
+      const workspaceCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+      const { data: newWs } = await supabase
+        .from('workspaces')
+        .insert({ name: addWsName.trim(), workspace_code: workspaceCode, owner_id: me.id })
+        .select()
+        .single();
+
+      if (!newWs) {
+        setAddWsLoading(false);
+        return setAddWsError('Failed to create workspace.');
+      }
+
+      await supabase.from('workspace_members').insert({ workspace_id: newWs.id, user_id: me.id, role: 'admin' });
+
+      const { data: lobby } = await supabase
+        .from('channels')
+        .insert({ workspace_id: newWs.id, name: 'lobby', description: 'Welcome!', is_private: false, created_by: me.id, is_default: true })
+        .select().single();
+
+      if (lobby) {
+        await supabase.from('channel_members').insert({ channel_id: lobby.id, user_id: me.id });
+        await supabase.from('messages').insert({ channel_id: lobby.id, sender_id: me.id, content: `${me.full_name} created this workspace. Welcome!`, is_pinned: false, is_system: true });
+      }
+
+      setAddWsLoading(false);
+      setShowAddWorkspace(false);
+      router.push(`/workspace/${newWs.id}`);
+    }
+  };
   // ─── Helpers ──────────────────────────────────────────────
   const formatTime = (ts: string) =>
     new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -1699,7 +2837,7 @@ export default function WorkspacePage() {
       </div>
   );
 
-  const PresenceDot = ({ userId, size = 9, borderColor = "var(--bg-sidebar)" }: { userId: string; size?: number; borderColor?: string }) => {
+  const PresenceDot = ({ userId, size = 9, borderColor = "var(--bg-primary)" }: { userId: string; size?: number; borderColor?: string }) => {
     const isOnline = onlineUsers.has(userId);
     return (
       <div style={{
@@ -2149,6 +3287,33 @@ export default function WorkspacePage() {
   // Everyone can manage a channel if it's active
   const canManageChannel = !!activeChannel;
 
+  const STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; bg: string }> = {
+    open:               { label: 'Open',             color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
+    active:             { label: 'Active',            color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
+    in_review:          { label: 'In Review',         color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+    changes_requested:  { label: 'Changes Requested', color: '#ef4444', bg: 'rgba(239,68,68,0.12)'  },
+    complete:           { label: 'Complete',          color: '#22c55e', bg: 'rgba(34,197,94,0.12)'  },
+  };
+
+  const PRIORITY_CONFIG: Record<TaskPriority, { label: string; color: string }> = {
+    low:    { label: 'Low',    color: '#6b7280' },
+    medium: { label: 'Medium', color: '#f59e0b' },
+    high:   { label: 'High',   color: '#ef4444' },
+    urgent: { label: 'Urgent', color: '#7c3aed' },
+  };
+
+  const isProjectAdmin =
+    me?.id === activeProject?.created_by ||
+    projectMembers.find((m: any) => m.user_id === me?.id)?.role === 'admin';
+
+  const filteredTasks = useMemo(() => {
+    return projectTasks.filter((t) => {
+      if (taskFilter === 'all') return true;
+      if (taskFilter === 'task' || taskFilter === 'milestone') return t.type === taskFilter;
+      return t.status === taskFilter;
+    });
+  }, [projectTasks, taskFilter]);
+
   // ─── Loading screen ───────────────────────────────────────
   if (loading || checking) return (
     <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -2173,11 +3338,11 @@ export default function WorkspacePage() {
   };
 
   const ReplyPreviewBar = ({
-    senderName,
+    sendername,
     content,
     onCancel,
   }: {
-    senderName: string;
+    sendername: string;
     content: string;
     onCancel: () => void;
   }) => {
@@ -2196,7 +3361,7 @@ export default function WorkspacePage() {
           <polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" />
         </svg>
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#E01E5A', marginBottom: 1 }}>{senderName}</div>
+          <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#E01E5A', marginBottom: 1 }}>{sendername}</div>
           <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{plain || 'Attachment'}</div>
         </div>
         <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 4, display: 'flex', alignItems: 'center', borderRadius: 4 }}>
@@ -2213,7 +3378,7 @@ export default function WorkspacePage() {
     originalId,
     onScrollTo,
   }: {
-    snapshot: { senderName: string; content: string };
+    snapshot: { sendername: string; content: string };
     originalId?: string | null;
     onScrollTo?: (id: string) => void;
   }) => {
@@ -2229,7 +3394,7 @@ export default function WorkspacePage() {
       >
         <div style={{ width: 3, backgroundColor: '#E01E5A', borderRadius: '3px 0 0 3px', flexShrink: 0 }} />
         <div style={{ flex: 1, backgroundColor: 'var(--bg-hover)', padding: '5px 10px', borderRadius: '0 6px 6px 0', border: '1px solid var(--border-color)', borderLeft: 'none' }}>
-          <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#E01E5A', marginBottom: 2 }}>{snapshot.senderName}</div>
+          <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#E01E5A', marginBottom: 2 }}>{snapshot.sendername}</div>
           <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{plain || 'Attachment'}</div>
         </div>
       </div>
@@ -2377,6 +3542,8 @@ export default function WorkspacePage() {
     );
   };
 
+
+
   // ─── RENDER ───────────────────────────────────────────────
   const resolvedLogoTheme = themeMode === 'system'
     ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
@@ -2399,7 +3566,7 @@ export default function WorkspacePage() {
       <div style={{
         flexShrink: 0,
         height: 48,
-        backgroundColor: "var(--bg-sidebar)",
+        backgroundColor: "var(--bg-primary)",
         borderBottom: "1px solid var(--border-color)",
         display: "flex",
         alignItems: "center",
@@ -2436,187 +3603,463 @@ export default function WorkspacePage() {
         {/* ── SIDEBAR ROOT ── */}
         <div style={{
           width: 260, flexShrink: 0, display: "flex", flexDirection: "column",
-          backgroundColor: "var(--bg-sidebar)",
+          backgroundColor: "var(--bg-primary)",
           borderRight: "1px solid var(--border-color)",
           height: "100%", overflow: "hidden",
         }}>
 
           {/* 1. WORKSPACE HEADER — fixed top */}
-          <div style={{ flexShrink: 0, padding: "0 14px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid var(--border-color)" }}>
+          <div style={{
+            flexShrink: 0,
+            padding: '0 10px 0 14px',
+            height: 56,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            borderBottom: '1px solid var(--border-color)',
+            position: 'relative',
+          }}>
+            {/* Workspace name — opens SWITCHER */}
             <button
-              onClick={() => setShowWorkspaceInfo(true)}
-              style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, color: "var(--text-primary)", fontWeight: 700, fontSize: "0.95rem", padding: "4px 6px", borderRadius: 7, flex: 1, textAlign: "left" }}
-              onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-              onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
+              onClick={() => setShowWorkspaceSwitcher(p => !p)}
+              style={{
+                flex: 1,
+                background: 'none', border: 'none', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: 8,
+                color: 'var(--text-primary)', fontWeight: 700, fontSize: '0.95rem',
+                padding: '5px 6px', borderRadius: 7, textAlign: 'left',
+                overflow: 'hidden',
+              }}
+              onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-hover)'}
+              onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
             >
               {workspace?.image_url
-                ? <img src={workspace.image_url} style={{ width: 24, height: 24, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} alt="" />
-                : <div style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.7rem", fontWeight: 700, color: "#fff", flexShrink: 0 }}>
+                ? <img src={workspace.image_url} style={{ width: 22, height: 22, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} alt="" />
+                : <div style={{ width: 22, height: 22, borderRadius: 6, backgroundColor: '#E01E5A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem', fontWeight: 700, color: '#fff', flexShrink: 0 }}>
                   {workspace?.name?.[0]?.toUpperCase()}
                 </div>
               }
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                 {workspace?.name}
               </span>
-              <ChevronDown size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+              <ChevronDown size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
             </button>
+
+            {/* ✅ Workspace settings icon — opens WORKSPACE INFO MODAL */}
+            <button
+              onClick={() => {
+                setShowWorkspaceInfo(true);
+                setEditingWorkspace(false);
+                setShowLeaveConfirm(false);
+              }}
+              title="Workspace settings"
+              style={{
+                flexShrink: 0,
+                width: 30, height: 30,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'none', border: 'none', cursor: 'pointer',
+                borderRadius: 7,
+                color: 'var(--icon-color)',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
+                e.currentTarget.style.color = 'var(--icon-hover)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = 'var(--icon-color)';
+              }}
+            >
+              <Settings size={15} />
+            </button>
+
+            {/* ── WORKSPACE SWITCHER DROPDOWN ── */}
+            {showWorkspaceSwitcher && (
+              <div
+                ref={workspaceSwitcherRef}
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 6px)',
+                  left: 10,
+                  right: 10,
+                  backgroundColor: 'var(--bg-secondary)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 12,
+                  boxShadow: '0 12px 40px var(--shadow-color)',
+                  zIndex: 500,
+                  overflow: 'hidden',
+                  animation: 'fadeSlideDown 0.15s ease',
+                }}
+              >
+                {/* Section label */}
+                <div style={{ padding: '8px 12px 4px', fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                  Your Workspaces
+                </div>
+
+                {/* Workspace list */}
+                {myWorkspaces.map(ws => {
+                  const isActive = ws.id === workspaceId;
+                  return (
+                    <button
+                      key={ws.id}
+                      onClick={() => {
+                        setShowWorkspaceSwitcher(false);
+                        if (!isActive) router.push(`/workspace/${ws.id}`);
+                      }}
+                      style={{
+                        width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '8px 12px', border: 'none', cursor: 'pointer', textAlign: 'left',
+                        backgroundColor: isActive ? 'var(--bg-active)' : 'transparent',
+                        color: 'var(--text-primary)',
+                        transition: 'background 0.12s',
+                      }}
+                      onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; }}
+                      onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                    >
+                      {ws.image_url
+                        ? <img src={ws.image_url} style={{ width: 28, height: 28, borderRadius: 7, objectFit: 'cover', flexShrink: 0, border: isActive ? '2px solid #E01E5A' : '2px solid transparent' }} alt="" />
+                        : <div style={{ width: 28, height: 28, borderRadius: 7, backgroundColor: isActive ? '#E01E5A' : 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.78rem', fontWeight: 700, color: isActive ? '#fff' : 'var(--text-secondary)', flexShrink: 0 }}>
+                          {ws.name?.[0]?.toUpperCase()}
+                        </div>
+                      }
+                      <div style={{ flex: 1, overflow: 'hidden' }}>
+                        <div style={{ fontSize: '0.85rem', fontWeight: isActive ? 700 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {ws.name}
+                        </div>
+                        {isActive && (
+                          <div style={{ fontSize: '0.7rem', color: '#E01E5A', fontWeight: 600 }}>Current</div>
+                        )}
+                      </div>
+                      {isActive && <Check size={14} style={{ color: '#E01E5A', flexShrink: 0 }} />}
+                    </button>
+                  );
+                })}
+
+                {/* Divider */}
+                <div style={{ height: 1, backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
+
+                {/* Add workspace button */}
+                <button
+                  onClick={() => {
+                    setShowWorkspaceSwitcher(false);
+                    setShowAddWorkspace(true);
+                  }}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '9px 12px', border: 'none', cursor: 'pointer', textAlign: 'left',
+                    backgroundColor: 'transparent', color: 'var(--text-secondary)',
+                    transition: 'background 0.12s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = 'var(--bg-hover)'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                  <div style={{ width: 28, height: 28, borderRadius: 7, backgroundColor: 'var(--bg-tertiary)', border: '1.5px dashed var(--border-strong)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <Plus size={14} style={{ color: 'var(--text-muted)' }} />
+                  </div>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 500 }}>Add or create workspace</span>
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* 2. MIDDLE SECTION — split scrollable areas */}
-          <div style={{
-            flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0
-          }}>
+          {/* 2. MIDDLE SECTION — collapsible Channels, DMs, Projects */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', minHeight: 0, padding: '8px 0' }}>
 
-            {/* CHANNELS SECTION */}
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
-              {/* Header row */}
-              <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 12px 4px 18px" }}>
-                <span style={{ fontSize: "0.72rem", fontWeight: 700, color: "var(--text-muted)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                  Channels
-                </span>
-                <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+            {/* ─── CHANNELS SECTION ─── */}
+            <div style={{ marginBottom: 4 }}>
+              {/* Section header */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px 4px 14px' }}>
+                <button
+                  onClick={() => {
+                    const next = !sidebarChannelsOpen;
+                    setSidebarChannelsOpen(next);
+                    saveSidebarCollapse(next, sidebarDmsOpen, sidebarProjectsOpen);
+                  }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '3px 4px', borderRadius: 5, flex: 1, textAlign: 'left' }}
+                  onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                  onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ transition: 'transform 0.2s', transform: sidebarChannelsOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Channels</span>
+                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   {/* Refresh */}
-                  <div style={{ position: "relative" }}>
-                    <button
-                      onClick={refreshChannels}
-                      disabled={refreshingChannels}
-                      title="Refresh channel list"
-                      style={{ background: "none", border: "none", cursor: refreshingChannels ? "not-allowed" : "pointer", color: channelListStale ? "#facc15" : "var(--text-muted)", padding: "2px 4px", borderRadius: 4, display: "flex", alignItems: "center", transition: "color 0.2s" }}
-                      onMouseEnter={e => { if (!channelListStale) e.currentTarget.style.color = "var(--text-primary)"; }}
-                      onMouseLeave={e => { if (!channelListStale) e.currentTarget.style.color = "var(--text-muted)"; }}
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: refreshingChannels ? "spin 0.7s linear infinite" : "none" }}>
-                        <path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                  <div style={{ position: 'relative' }}>
+                    <button onClick={refreshChannels} disabled={refreshingChannels} title="Refresh channel list"
+                      style={{ background: 'none', border: 'none', cursor: refreshingChannels ? 'not-allowed' : 'pointer', color: channelListStale ? '#facc15' : 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center', transition: 'color 0.2s' }}
+                      onMouseEnter={e => { if (!channelListStale) e.currentTarget.style.color = 'var(--text-primary)' }}
+                      onMouseLeave={e => { if (!channelListStale) e.currentTarget.style.color = 'var(--text-muted)' }}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                        style={{ animation: refreshingChannels ? 'spin 0.7s linear infinite' : 'none' }}>
+                        <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                       </svg>
                     </button>
-                    {channelListStale && !refreshingChannels && <span style={{ position: "absolute", top: 1, right: 1, width: 6, height: 6, borderRadius: "50%", backgroundColor: "#facc15", border: "1.5px solid var(--bg-sidebar)", pointerEvents: "none" }} />}
+                    {channelListStale && !refreshingChannels && (
+                      <span style={{ position: 'absolute', top: 1, right: 1, width: 6, height: 6, borderRadius: '50%', backgroundColor: '#facc15', border: '1.5px solid var(--bg-primary)', pointerEvents: 'none' }} />
+                    )}
                   </div>
-                  {/* Plus */}
-                  <button
-                    onClick={() => setShowCreateChannel(true)}
-                    title="Create channel"
-                    style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "2px 4px", borderRadius: 4, display: "flex", alignItems: "center" }}
-                    onMouseEnter={e => e.currentTarget.style.color = "var(--text-primary)"}
-                    onMouseLeave={e => e.currentTarget.style.color = "var(--text-muted)"}
-                  >
+                  {/* Add channel */}
+                  <button onClick={() => setShowCreateChannel(true)} title="Create channel"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center' }}
+                    onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                    onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
                     <Plus size={14} strokeWidth={2.5} />
                   </button>
                 </div>
               </div>
 
-              {/* Scrollable list */}
-              <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "4px 10px" }}>
-                {channels.map(ch => {
-                  const isActive = view === "channel" && activeChannel?.id === ch.id;
-                  const unread = unreadCounts[ch.id] || 0;
-                  return (
-                    <button
-                      key={ch.id}
-                      onClick={() => switchChannel(ch)}
-                      style={{
-                        width: "100%", display: "flex", alignItems: "center", gap: 7,
-                        padding: "5px 8px", borderRadius: 7, border: "none", cursor: "pointer",
-                        backgroundColor: isActive ? "var(--bg-active)" : "transparent",
-                        color: isActive ? "var(--text-primary)" : unread > 0 ? "var(--text-primary)" : "var(--text-secondary)",
-                        textAlign: "left", transition: "background 0.12s", marginBottom: 1,
-                      }}
-                      onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
-                      onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = "transparent"; }}
-                    >
-                      <div style={{ color: isActive ? "#E01E5A" : "var(--text-muted)", display: "flex", alignItems: "center", flexShrink: 0 }}>
-                        <ChannelIcon channel={ch} size={13} />
-                      </div>
-                      <span style={{ fontSize: "0.875rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: isActive || unread > 0 ? 600 : 400, flex: 1 }}>
-                        {ch.name}
-                      </span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        {mentionCounts[ch.id] > 0 && (
-                          <div style={{ width: 18, height: 18, borderRadius: '50%', backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                            @
-                          </div>
+              {/* Channel list */}
+              {sidebarChannelsOpen && (
+                <div style={{ padding: '2px 10px' }}>
+                  {channels.map(ch => {
+                    const isActive = view === 'channel' && activeChannel?.id === ch.id;
+                    const unread = unreadCounts[ch.id] ?? 0;
+                    const mentions = mentionCounts[ch.id] ?? 0;
+                    return (
+                      <button key={ch.id} onClick={() => switchChannel(ch)}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer', backgroundColor: isActive ? 'var(--bg-active)' : 'transparent', color: isActive ? 'var(--text-primary)' : unread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)', textAlign: 'left', transition: 'background 0.12s', marginBottom: 1 }}
+                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
+                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'transparent' }}>
+                        <div style={{ color: isActive ? '#E01E5A' : ch.is_private ? 'var(--icon-color)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                          <ChannelIcon channel={ch} size={14} />
+                        </div>
+                        <span style={{ flex: 1, fontSize: '0.875rem', fontWeight: unread > 0 ? 700 : isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {ch.name}
+                        </span>
+                        {mentions > 0 && (
+                          <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
+                            {mentions}
+                          </span>
                         )}
-                        {unread > 0 && (
-                          <div style={{ minWidth: 18, height: 18, borderRadius: 999, backgroundColor: "#E01E5A", color: "#fff", fontSize: "0.68rem", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>
-                            {unread > 99 ? "99+" : unread}
-                          </div>
+                        {unread > 0 && mentions === 0 && (
+                          <span style={{ backgroundColor: 'var(--text-muted)', color: 'var(--bg-primary)', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
+                            {unread}
+                          </span>
                         )}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            {/* DIVIDER */}
-            <div style={{ flexShrink: 0, height: 1, backgroundColor: 'var(--border-color)', margin: '4px 12px' }} />
+            {/* Divider */}
+            <div style={{ height: 1, backgroundColor: 'var(--border-color)', margin: '4px 14px' }} />
 
-            {/* DM SECTION */}
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
-              {/* Header row */}
-              <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 12px 4px 18px" }}>
-                <span style={{ fontSize: "0.72rem", fontWeight: 700, color: "var(--text-muted)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                  Direct Messages
-                </span>
-                {/* Refresh icon */}
-                <div style={{ position: "relative" }}>
-                  <button
-                    onClick={refreshMembers}
-                    disabled={refreshingMembers}
-                    title="Refresh member list"
-                    style={{ background: "none", border: "none", cursor: refreshingMembers ? "not-allowed" : "pointer", color: memberListStale ? "#facc15" : "var(--text-muted)", padding: "2px 4px", borderRadius: 4, display: "flex", alignItems: "center", transition: "color 0.2s" }}
-                    onMouseEnter={e => { if (!memberListStale) e.currentTarget.style.color = "var(--text-primary)"; }}
-                    onMouseLeave={e => { if (!memberListStale) e.currentTarget.style.color = "var(--text-muted)"; }}
-                  >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: refreshingMembers ? "spin 0.7s linear infinite" : "none" }}>
-                      <path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                    </svg>
-                  </button>
-                  {memberListStale && !refreshingMembers && <span style={{ position: "absolute", top: 1, right: 1, width: 6, height: 6, borderRadius: "50%", backgroundColor: "#facc15", border: "1.5px solid var(--bg-sidebar)", pointerEvents: "none" }} />}
+            {/* ─── DIRECT MESSAGES SECTION ─── */}
+            <div style={{ marginBottom: 4 }}>
+              {/* Section header */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px 4px 14px' }}>
+                <button
+                  onClick={() => {
+                    const next = !sidebarDmsOpen;
+                    setSidebarDmsOpen(next);
+                    saveSidebarCollapse(sidebarChannelsOpen, next, sidebarProjectsOpen);
+                  }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '3px 4px', borderRadius: 5, flex: 1, textAlign: 'left' }}
+                  onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                  onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ transition: 'transform 0.2s', transform: sidebarDmsOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Direct Messages</span>
+                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                  {/* Refresh */}
+                  <div style={{ position: 'relative' }}>
+                    <button onClick={refreshMembers} disabled={refreshingMembers} title="Refresh member list"
+                      style={{ background: 'none', border: 'none', cursor: refreshingMembers ? 'not-allowed' : 'pointer', color: memberListStale ? '#facc15' : 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center', transition: 'color 0.2s' }}
+                      onMouseEnter={e => { if (!memberListStale) e.currentTarget.style.color = 'var(--text-primary)' }}
+                      onMouseLeave={e => { if (!memberListStale) e.currentTarget.style.color = 'var(--text-muted)' }}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                        style={{ animation: refreshingMembers ? 'spin 0.7s linear infinite' : 'none' }}>
+                        <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                      </svg>
+                    </button>
+                    {memberListStale && !refreshingMembers && (
+                      <span style={{ position: 'absolute', top: 1, right: 1, width: 6, height: 6, borderRadius: '50%', backgroundColor: '#facc15', border: '1.5px solid var(--bg-primary)', pointerEvents: 'none' }} />
+                    )}
+                  </div>
                 </div>
               </div>
 
-              {/* Scrollable list */}
-              <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "4px 10px" }}>
-                {members.filter(m => m.user_id !== me?.id).map(m => {
-                  const isActive = view === "dm" && activeDmUserId === m.user_id;
-                  const dmUnread = dmUnreadCounts[m.user_id] || 0;
-                  return (
+              {/* DM list */}
+              {sidebarDmsOpen && (
+                <div style={{ padding: '2px 10px' }}>
+                  {/* Self DM */}
+                  {me && (
                     <button
-                      key={m.user_id}
-                      onClick={() => openDm(m.user_id, m.profile)}
+                      onClick={() => openDm(me.id, me)}
                       style={{
-                        width: "100%", display: "flex", alignItems: "center", gap: 8,
-                        padding: "5px 8px", borderRadius: 7, border: "none", cursor: "pointer",
-                        backgroundColor: isActive ? "var(--bg-active)" : "transparent",
-                        color: isActive ? "var(--text-primary)" : dmUnread > 0 ? "var(--text-primary)" : "var(--text-secondary)",
-                        textAlign: "left", transition: "background 0.12s", marginBottom: 1,
+                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer',
+                        backgroundColor: (view === 'dm' && activeDmUserId === me.id) ? 'var(--bg-active)' : 'transparent',
+                        color: (view === 'dm' && activeDmUserId === me.id) ? 'var(--text-primary)' : (dmUnreadCounts[me.id] ?? 0) > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        textAlign: 'left', transition: 'background 0.12s', marginBottom: 1
                       }}
-                      onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
-                      onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = "transparent"; }}
+                      onMouseEnter={e => { if (!(view === 'dm' && activeDmUserId === me.id)) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
+                      onMouseLeave={e => { if (!(view === 'dm' && activeDmUserId === me.id)) e.currentTarget.style.backgroundColor = 'transparent' }}
                     >
-                      <div style={{ position: "relative", flexShrink: 0 }}>
-                        <Avatar profile={m.profile} size={22} />
-                        <div style={{ position: "absolute", bottom: -1, right: -1 }}>
-                          <PresenceDot userId={m.user_id} size={8} />
+                      <div style={{ position: 'relative', flexShrink: 0 }}>
+                        <Avatar profile={me} size={22} />
+                        <div style={{ position: 'absolute', bottom: -1, right: -1 }}>
+                          <PresenceDot userId={me.id} size={8} borderColor="var(--bg-primary)" />
                         </div>
                       </div>
-                      <span style={{ fontSize: "0.875rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: isActive || dmUnread > 0 ? 600 : 400, flex: 1 }}>
-                        {m.profile?.full_name}
+                      <span style={{
+                        flex: 1, fontSize: '0.875rem',
+                        fontWeight: (dmUnreadCounts[me.id] ?? 0) > 0 ? 700 : (view === 'dm' && activeDmUserId === me.id) ? 600 : 400,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+                      }}>
+                        {me.full_name} <span style={{ fontSize: '0.7rem', color: 'var(--text-faint)' }}>(you)</span>
                       </span>
-                      {dmUnread > 0 ? (
-                        <div style={{ minWidth: 18, height: 18, borderRadius: 999, backgroundColor: "#E01E5A", color: "#fff", fontSize: "0.68rem", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px", flexShrink: 0 }}>
-                          {dmUnread > 99 ? "99+" : dmUnread}
-                        </div>
-                      ) : onlineUsers.has(m.user_id) ? (
-                        <span style={{ fontSize: "0.65rem", color: "var(--unread-dot)", marginLeft: "auto", fontWeight: 500, flexShrink: 0 }}>
-                          online
+                      {(dmUnreadCounts[me.id] ?? 0) > 0 && (
+                        <span style={{
+                          backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem',
+                          fontWeight: 700, borderRadius: '999px', padding: '1px 5px',
+                          minWidth: 16, textAlign: 'center', flexShrink: 0
+                        }}>
+                          {dmUnreadCounts[me.id]}
                         </span>
-                      ) : null}
+                      )}
                     </button>
-                  );
-                })}
-              </div>
+                  )}
+
+                  {/* Other members */}
+                  {members.filter(m => m.user_id !== me?.id).map(m => {
+                    const isActive = view === 'dm' && activeDmUserId === m.user_id;
+                    const dmUnread = dmUnreadCounts[m.user_id] ?? 0;
+                    return (
+                      <button key={m.user_id} onClick={() => openDm(m.user_id, m.profile)}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer', backgroundColor: isActive ? 'var(--bg-active)' : 'transparent', color: isActive ? 'var(--text-primary)' : dmUnread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)', textAlign: 'left', transition: 'background 0.12s', marginBottom: 1 }}
+                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
+                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'transparent' }}>
+                        <div style={{ position: 'relative', flexShrink: 0 }}>
+                          <Avatar profile={m.profile} size={22} />
+                          <div style={{ position: 'absolute', bottom: -1, right: -1 }}>
+                            <PresenceDot userId={m.user_id} size={8} borderColor="var(--bg-primary)" />
+                          </div>
+                        </div>
+                        <span style={{ flex: 1, fontSize: '0.875rem', fontWeight: dmUnread > 0 ? 700 : isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {m.profile?.full_name}
+                        </span>
+                        {dmUnread > 0 && (
+                          <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
+                            {dmUnread}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
+
+            {/* Divider */}
+            <div style={{ height: 1, backgroundColor: 'var(--border-color)', margin: '4px 14px' }} />
+
+            {/* ─── PROJECTS SECTION ─── */}
+            <div style={{ marginBottom: 4 }}>
+              {/* Section header */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px 4px 14px' }}>
+                <button
+                  onClick={() => {
+                    const next = !sidebarProjectsOpen;
+                    setSidebarProjectsOpen(next);
+                    saveSidebarCollapse(sidebarChannelsOpen, sidebarDmsOpen, next);
+                  }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '3px 4px', borderRadius: 5, flex: 1, textAlign: 'left' }}
+                  onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                  onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ transition: 'transform 0.2s', transform: sidebarProjectsOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Projects</span>
+                </button>
+                {/* Add project — wired in Phase 3 */}
+                <button
+                  onClick={() => setShowCreateProject(true)}
+                  title="Create project"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center' }}
+                  onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                  onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
+                  <Plus size={14} strokeWidth={2.5} />
+                </button>
+              </div>
+
+              {/* Projects list — dynamic */}
+              {sidebarProjectsOpen && (
+                <div style={{ padding: '2px 10px' }}>
+                  {loadingProjects ? (
+                    <div style={{ padding: '8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid var(--border-strong)', borderTopColor: '#E01E5A', animation: 'spin 0.7s linear infinite' }} />
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Loading…</span>
+                    </div>
+                  ) : projects.length === 0 ? (
+                    <div style={{ padding: '10px 8px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="2" y="7" width="20" height="14" rx="2" />
+                        <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" />
+                        <line x1="12" y1="12" x2="12" y2="16" />
+                        <line x1="10" y1="14" x2="14" y2="14" />
+                      </svg>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-faint)', textAlign: 'center', lineHeight: 1.4 }}>
+                        No projects yet.<br />
+                        <span
+                          style={{ color: '#E01E5A', cursor: 'pointer', textDecoration: 'underline' }}
+                          onClick={() => setShowCreateProject(true)}
+                        >Create one</span>
+                      </span>
+                    </div>
+                  ) : (
+                    projects.map(proj => {
+                      const isActive = view === 'project' && activeProject?.id === proj.id;
+                      return (
+                        <button key={proj.id} onClick={() => openProject(proj)}
+                          style={{
+                            width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "5px 12px", border: "none",
+                            background: isActive ? "var(--bg-active)" : "transparent",
+                            color: isActive ? "var(--text-primary)" : "var(--text-muted)",
+                            textAlign: "left", cursor: "pointer", borderRadius: 6, fontSize: "0.85rem", fontWeight: 500, transition: "all 0.1s"
+                          }}
+                          onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                          onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                        >
+                          <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: proj.color, flexShrink: 0 }} />
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{proj.name}</span>
+                          {(projectChatUnread[proj.id] ?? 0) > 0 && (
+                            <span style={{
+                              backgroundColor: '#E01E5A',
+                              color: '#fff',
+                              fontSize: '0.65rem',
+                              fontWeight: 700,
+                              borderRadius: 999,
+                              padding: '1px 5px',
+                              minWidth: 16,
+                              textAlign: 'center',
+                              flexShrink: 0,
+                              marginLeft: 'auto',
+                            }}>
+                              {projectChatUnread[proj.id]}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+            </div>
+
           </div>
 
           {/* 3. PROFILE INFO — fixed bottom */}
@@ -3042,7 +4485,7 @@ export default function WorkspacePage() {
                   {/* Reply preview */}
                   {replyingTo && (
                     <ReplyPreviewBar
-                      senderName={replyingTo.sender?.full_name ?? 'Unknown'}
+                      sendername={replyingTo.sender?.full_name ?? 'Unknown'}
                       content={replyingTo.content}
                       onCancel={() => setReplyingTo(null)}
                     />
@@ -3325,7 +4768,7 @@ export default function WorkspacePage() {
                           <div ref={dmMenuRef} style={{ position: "absolute", top: 4, right: 8, display: "flex", gap: 2, backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "2px", boxShadow: "0 4px 12px var(--shadow-color)", zIndex: 10 }}>
                             <button
                               title="Reply"
-                              onClick={() => setDmReplyingTo({ ...msg, senderName: msg.sender_id === me?.id ? (me?.full_name ?? 'You') : (activeDmUser?.full_name ?? 'User') })}
+                              onClick={() => setDmReplyingTo({ ...msg, sendername: msg.sender_id === me?.id ? (me?.full_name ?? 'You') : (activeDmUser?.full_name ?? 'User') })}
                               style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "4px 6px", borderRadius: 6, display: "flex", alignItems: "center" }}
                               onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
                               onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
@@ -3374,7 +4817,7 @@ export default function WorkspacePage() {
                   {/* DM Reply preview */}
                   {dmReplyingTo && (
                     <ReplyPreviewBar
-                      senderName={dmReplyingTo.senderName ?? 'Unknown'}
+                      sendername={dmReplyingTo.sendername ?? 'Unknown'}
                       content={dmReplyingTo.content}
                       onCancel={() => setDmReplyingTo(null)}
                     />
@@ -3542,6 +4985,597 @@ export default function WorkspacePage() {
                 </p>
               </div>
             </>
+          )}
+
+          {/* PROJECT VIEW */}
+          {(view as string) === 'project' && activeProject && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+              {/* ── Project Header ── */}
+              <div style={{ height: 56, borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: 12, padding: '0 20px', flexShrink: 0, backgroundColor: 'var(--bg-topbar)' }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: activeProject.color, flexShrink: 0 }} />
+                <span style={{ fontWeight: 600, fontSize: '0.92rem', color: 'var(--text-primary)' }}>{activeProject.name}</span>
+                {activeProject.description && (
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                    — {activeProject.description}
+                  </span>
+                )}
+                <div style={{ flex: 1 }} />
+                {/* Stacked member avatars */}
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  {projectMembers.slice(0, 5).map((pm, i) => (
+                    <div key={pm.id} style={{ marginLeft: i === 0 ? 0 : -8, zIndex: 5 - i }}>
+                      <Avatar profile={pm.profile} size={26} />
+                    </div>
+                  ))}
+                  {projectMembers.length > 5 && (
+                    <div style={{ marginLeft: -8, width: 26, height: 26, borderRadius: '50%', backgroundColor: 'var(--bg-tertiary)', border: '2px solid var(--bg-topbar)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem', fontWeight: 700, color: 'var(--text-muted)' }}>
+                      +{projectMembers.length - 5}
+                    </div>
+                  )}
+                </div>
+                {/* Settings */}
+                <button
+                  onClick={() => { setEditProjectName(activeProject.name); setEditProjectDesc(activeProject.description ?? ''); setEditProjectColor(activeProject.color); setProjectSettingsTab('about'); setShowProjectSettings(true) }}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '7px', borderRadius: 8, display: 'flex', alignItems: 'center', transition: 'all 0.15s' }}
+                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--icon-hover)'; e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
+                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--icon-color)'; e.currentTarget.style.backgroundColor = 'transparent' }}>
+                  <Settings size={17} />
+                </button>
+              </div>
+
+              {/* ── Tab Bar ── */}
+              <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', padding: '0 20px', backgroundColor: 'var(--bg-topbar)', flexShrink: 0 }}>
+                {(['overview', 'chat'] as const).map(tab => {
+                  const unread = (tab === 'chat' && activeProject) ? (projectChatUnread[activeProject.id] ?? 0) : 0;
+                  return (
+                    <button key={tab} onClick={() => switchProjectTab(tab)}
+                      style={{ padding: '10px 18px', background: 'none', border: 'none', borderBottom: projectTab === tab ? '2px solid #E01E5A' : '2px solid transparent', cursor: 'pointer', fontSize: '0.85rem', fontWeight: projectTab === tab ? 600 : 400, color: projectTab === tab ? '#E01E5A' : 'var(--text-muted)', textTransform: 'capitalize', transition: 'all 0.15s', marginBottom: -1, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {tab === 'overview' ? <LayoutDashboard size={14} /> : <MessageSquare size={14} />}
+                      {tab}
+                      {unread > 0 && (
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          minWidth: 17, height: 17, borderRadius: 999, backgroundColor: '#E01E5A',
+                          color: '#fff', fontSize: '0.62rem', fontWeight: 700, padding: '0 4px', lineHeight: 1,
+                        }}>
+                          {unread > 99 ? '99+' : unread}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* ── OVERVIEW TAB ── */}
+              {projectTab === 'overview' && (
+                <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px' }}>
+
+                  {/* Project header */}
+                  <div style={{ marginBottom: 24 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                      <div style={{ width: 13, height: 13, borderRadius: '50%', backgroundColor: activeProject!.color, flexShrink: 0 }} />
+                      <h2 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                        {activeProject!.name}
+                      </h2>
+                      <span style={{
+                        fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                        backgroundColor: activeProject!.is_private ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)',
+                        color: activeProject!.is_private ? '#ef4444' : '#22c55e',
+                        border: `1px solid ${activeProject!.is_private ? 'rgba(239,68,68,0.25)' : 'rgba(34,197,94,0.25)'}`,
+                      }}>
+                        {activeProject!.is_private ? '🔒 Private' : '🌐 Public'}
+                      </span>
+                    </div>
+                    {activeProject!.description && (
+                      <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: 1.65, maxWidth: 580 }}>
+                        {activeProject!.description}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Stats row */}
+                  <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
+                    {[
+                      { label: 'Total', value: projectTasks.length, color: 'var(--text-muted)' },
+                      { label: 'Open', value: projectTasks.filter(t => t.status === 'open').length, color: '#6b7280' },
+                      { label: 'Active', value: projectTasks.filter(t => t.status === 'active').length, color: '#3b82f6' },
+                      { label: 'In Review', value: projectTasks.filter(t => t.status === 'in_review').length, color: '#f59e0b' },
+                      { label: 'Complete', value: projectTasks.filter(t => t.status === 'complete').length, color: '#22c55e' },
+                    ].map(s => (
+                      <div key={s.label} style={{
+                        flex: 1, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+                        borderRadius: 10, padding: '12px 16px', textAlign: 'center',
+                      }}>
+                        <div style={{ fontSize: '1.4rem', fontWeight: 700, color: s.color }}>{s.value}</div>
+                        <div style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Filter bar + action buttons */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                    {(['all', 'task', 'milestone', 'open', 'active', 'in_review', 'changes_requested', 'complete'] as const).map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setTaskFilter(f)}
+                        style={{
+                          padding: '4px 11px', borderRadius: 999, fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                          border: taskFilter === f ? '1px solid #E01E5A' : '1px solid var(--border-color)',
+                          backgroundColor: taskFilter === f ? 'rgba(224,30,90,0.12)' : 'transparent',
+                          color: taskFilter === f ? '#E01E5A' : 'var(--text-muted)',
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        {f === 'all' ? 'All'
+                          : f === 'task' ? 'Tasks'
+                          : f === 'milestone' ? 'Milestones'
+                          : f === 'in_review' ? 'In Review'
+                          : f === 'changes_requested' ? 'Changes Req.'
+                          : f.charAt(0).toUpperCase() + f.slice(1)}
+                      </button>
+                    ))}
+                    <div style={{ flex: 1 }} />
+                    {isProjectAdmin && (
+                      <>
+                        <button
+                          onClick={() => { setNewTaskType('task'); setShowCreateTask(true) }}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px',
+                            backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+                            borderRadius: 8, fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer',
+                          }}
+                        >
+                          <CheckSquare2 size={13} />
+                          Add Task
+                        </button>
+                        <button
+                          onClick={() => { setNewTaskType('milestone'); setShowCreateTask(true) }}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px',
+                            backgroundColor: '#E01E5A', border: 'none',
+                            borderRadius: 8, fontSize: '0.8rem', fontWeight: 600, color: '#fff', cursor: 'pointer',
+                          }}
+                        >
+                          <Milestone size={13} />
+                          Add Milestone
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Task list */}
+                  {loadingTasks ? (
+                    <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-faint)', fontSize: '0.88rem' }}>Loading…</div>
+                  ) : filteredTasks.length === 0 ? (
+                    <div style={{ border: '1px dashed var(--border-color)', borderRadius: 12, padding: '40px 24px', textAlign: 'center' }}>
+                      <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'center' }}>
+                        {taskFilter === 'milestone' ? (
+                          <Milestone size={36} style={{ color: 'var(--text-faint)' }} />
+                        ) : (
+                          <ClipboardList size={36} style={{ color: 'var(--text-faint)' }} />
+                        )}
+                      </div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                        {taskFilter === 'all' ? 'No tasks or milestones yet.' : `No items with status "${taskFilter}".`}
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                      {filteredTasks.map((task) => {
+                        const sc = STATUS_CONFIG[task.status]
+                        const pc = PRIORITY_CONFIG[task.priority]
+                        return (
+                          <div
+                            key={task.id}
+                            onClick={() => {
+                              setActiveTask(task);
+                              setShowTaskPanel(true);
+                              setEditingDescription(false);
+                              setDescriptionDraft('');
+                            }}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px',
+                              borderRadius: 10, backgroundColor: 'var(--bg-secondary)',
+                              border: '1px solid var(--border-color)', cursor: 'pointer', transition: 'all 0.15s',
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.borderColor = 'var(--border-strong)'
+                              e.currentTarget.style.backgroundColor = 'var(--bg-hover)'
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.borderColor = 'var(--border-color)'
+                              e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'
+                            }}
+                          >
+                            <TaskTypeIcon type={task.type} size={16} />
+                            <span style={{
+                              flex: 1, fontSize: '0.88rem', fontWeight: 500,
+                              color: task.status === 'complete' ? 'var(--text-muted)' : 'var(--text-primary)',
+                              textDecoration: task.status === 'complete' ? 'line-through' : 'none',
+                            }}>
+                              {task.title}
+                            </span>
+                            <span style={{
+                              fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                              backgroundColor: sc.bg, color: sc.color, flexShrink: 0,
+                            }}>
+                              {sc.label}
+                            </span>
+                            <span style={{ fontSize: '0.68rem', fontWeight: 600, color: pc.color, flexShrink: 0, minWidth: 42 }}>
+                              {pc.label}
+                            </span>
+                            {task.assignee ? (
+                              <div title={task.assignee.full_name ?? ''} style={{
+                                width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
+                                backgroundColor: '#E01E5A', color: '#fff', overflow: 'hidden',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.68rem', fontWeight: 700,
+                              }}>
+                                {task.assignee.avatar_url
+                                  ? <img src={task.assignee.avatar_url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                                  : (task.assignee.full_name?.[0] ?? '?')}
+                              </div>
+                            ) : (
+                              <div style={{
+                                width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
+                                border: '1.5px dashed var(--border-strong)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                color: 'var(--text-faint)', fontSize: '0.65rem',
+                              }}>?</div>
+                            )}
+                            {task.due_date && (
+                              <span style={{ fontSize: '0.7rem', color: 'var(--text-faint)', flexShrink: 0 }}>
+                                {new Date(task.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── CHAT TAB ── */}
+              {projectTab === 'chat' && (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+                  {/* Messages area */}
+                  <div ref={projectMessagesContainerRef} style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {projectMsgLoading ? (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', gap: 10 }}>
+                        <div style={{ width: 18, height: 18, borderRadius: '50%', border: '2px solid var(--border-strong)', borderTopColor: '#E01E5A', animation: 'spin 0.7s linear infinite' }} />
+                        Loading messages…
+                      </div>
+                    ) : projectMessages.length === 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 12 }}>
+                        <MessageSquare size={40} style={{ color: 'var(--text-faint)' }} />
+                        <div style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-muted)' }}>No messages yet</div>
+                        <div style={{ fontSize: '0.82rem', color: 'var(--text-faint)' }}>Be the first to say something in <strong>{activeProject.name}</strong></div>
+                      </div>
+                    ) : (
+                      projectMessages.map((msg, i) => {
+
+                        {/* SYSTEM EVENT CARD */}
+                        if ((msg as any).is_system && (msg as any).event_meta) {
+                          const ev = (msg as any).event_meta;
+                          const isMilestone = ev.tasktype === 'milestone';
+
+                          const EVENT_META_MAP: Record<string, { label: string; color: string; bg: string; borderColor: string }> = {
+                            taskassigned:          { label: isMilestone ? 'Milestone Assigned'    : 'Task Assigned',       color: '#3b82f6', bg: 'rgba(59,130,246,0.06)',  borderColor: 'rgba(59,130,246,0.2)'  },
+                            tasksubmitted:         { label: isMilestone ? 'Milestone Submitted'   : 'Work Submitted',       color: '#f59e0b', bg: 'rgba(245,158,11,0.06)', borderColor: 'rgba(245,158,11,0.2)'  },
+                            taskchangesrequested: { label: 'Changes Requested',                                            color: '#ef4444', bg: 'rgba(239,68,68,0.06)',   borderColor: 'rgba(239,68,68,0.2)'   },
+                            taskcompleted:        { label: isMilestone ? 'Milestone Completed'   : 'Task Completed',       color: '#22c55e', bg: 'rgba(34,197,94,0.06)',   borderColor: 'rgba(34,197,94,0.2)'   },
+                          };
+
+                          const ec = EVENT_META_MAP[ev.eventtype] ?? { label: ev.eventtype, color: '#6b7280', bg: 'rgba(107,114,128,0.06)', borderColor: 'rgba(107,114,128,0.2)' };
+
+                          // Build the human-readable headline
+                          const headline = (() => {
+                            const by = ev.assignedbyname || 'Someone';
+                            const to = ev.assignedtoname || 'a member';
+                            const typeLabel = isMilestone ? 'milestone' : 'task';
+                            switch (ev.eventtype) {
+                              case 'taskassigned':          return <><strong>{by}</strong> assigned a {typeLabel} to <strong>{to}</strong></>;
+                              case 'tasksubmitted':         return <><strong>{to}</strong> submitted work on a {typeLabel}</>;
+                              case 'taskchangesrequested': return <>Changes were requested on a {typeLabel}</>;
+                              case 'taskcompleted':        return <>A {typeLabel} was marked complete</>;
+                              default:                      return <>Activity on a {typeLabel}</>;
+                            }
+                          })();
+
+                          const descSnippet = ev.taskdescription
+                            ? ev.taskdescription.length > 90
+                              ? ev.taskdescription.slice(0, 90).trimEnd() + '…'
+                              : ev.taskdescription
+                            : null;
+
+                          return (
+                            <div key={msg.id} style={{ display: 'flex', justifyContent: 'center', padding: '6px 8px' }}>
+                              <div style={{
+                                backgroundColor: ec.bg,
+                                border: `1px solid ${ec.borderColor}`,
+                                borderRadius: 12,
+                                padding: '12px 16px',
+                                maxWidth: 460,
+                                width: '100%',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 8,
+                              }}>
+
+                                {/* Header row: badge label + time */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    {/* Type icon */}
+                                    <span style={{ display: 'flex', alignItems: 'center' }}>
+                                      {isMilestone
+                                        ? <Milestone size={13} style={{ color: ec.color }} />
+                                        : <CheckSquare2 size={13} style={{ color: ec.color }} />}
+                                    </span>
+                                    <span style={{
+                                      fontSize: '0.68rem', fontWeight: 700, color: ec.color,
+                                      textTransform: 'uppercase', letterSpacing: '0.06em',
+                                    }}>
+                                      {ec.label}
+                                    </span>
+                                  </div>
+                                  <span style={{ fontSize: '0.66rem', color: 'var(--text-faint)' }}>
+                                    {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+
+                                {/* Headline */}
+                                <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                                  {headline}
+                                </p>
+
+                                {/* Task/Milestone name card */}
+                                <div style={{
+                                  backgroundColor: 'var(--bg-primary)',
+                                  border: '1px solid var(--border-color)',
+                                  borderRadius: 8,
+                                  padding: '9px 12px',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: 4,
+                                }}>
+                                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.4 }}>
+                                    {ev.tasktitle}
+                                  </span>
+                                  {descSnippet && (
+                                    <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                                      {descSnippet}
+                                    </span>
+                                  )}
+                                  {ev.note && ev.eventtype !== 'taskassigned' && (
+                                    <div style={{ marginTop: 4, paddingTop: 6, borderTop: '1px solid var(--border-color)' }}>
+                                      <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                        Note
+                                      </span>
+                                      <p style={{ margin: '2px 0 0', fontSize: '0.77rem', color: 'var(--text-secondary)', lineHeight: 1.45, whiteSpace: 'pre-wrap' }}>
+                                        {ev.note}
+                                      </p>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* CTA button */}
+                                <button
+                                  onClick={() => {
+                                    // Switch to overview tab
+                                    switchProjectTab('overview');
+                                    // Find and open the task in the detail panel
+                                    const target = projectTasks.find(t => t.id === ev.taskid);
+                                    if (target) {
+                                      setActiveTask(target);
+                                      setShowTaskPanel(true);
+                                    }
+                                  }}
+                                  style={{
+                                    alignSelf: 'flex-start',
+                                    padding: '5px 14px',
+                                    borderRadius: 7,
+                                    backgroundColor: 'transparent',
+                                    border: `1.5px solid ${ec.borderColor}`,
+                                    color: ec.color,
+                                    fontSize: '0.76rem',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 5,
+                                    transition: 'all 0.15s',
+                                  }}
+                                  onMouseEnter={e => {
+                                    e.currentTarget.style.backgroundColor = ec.bg;
+                                    e.currentTarget.style.borderColor = ec.color;
+                                  }}
+                                  onMouseLeave={e => {
+                                    e.currentTarget.style.backgroundColor = 'transparent';
+                                    e.currentTarget.style.borderColor = ec.borderColor;
+                                  }}
+                                >
+                                  <ExternalLink size={12} />
+                                  {isMilestone ? 'View Milestone' : 'View Task'}
+                                </button>
+
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        // ── NORMAL BUBBLE (your existing code unchanged below) ──
+                        const isMe = msg.sender_id === me?.id
+                        const prev = projectMessages[i - 1]
+                        const showDate = i === 0 || new Date(prev.created_at).toDateString() !== new Date(msg.created_at).toDateString()
+                        const isGrouped = !showDate && prev?.sender_id === msg.sender_id && (new Date(msg.created_at).getTime() - new Date(prev.created_at).getTime()) < 5 * 60 * 1000
+
+                        return (
+                          <div key={msg.id}>
+                            {showDate && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0 10px', userSelect: 'none' }}>
+                                <div style={{ flex: 1, height: 1, backgroundColor: 'var(--border-color)' }} />
+                                <span style={{ fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)', padding: '2px 10px', backgroundColor: 'var(--bg-tertiary)', borderRadius: 999 }}>
+                                  {new Date(msg.created_at).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })}
+                                </span>
+                                <div style={{ flex: 1, height: 1, backgroundColor: 'var(--border-color)' }} />
+                              </div>
+                            )}
+                            <div
+                              onMouseEnter={() => setProjectHoveredId(msg.id)}
+                              onMouseLeave={() => { setProjectHoveredId(null); if (projectOpenMenuId === msg.id) setProjectOpenMenuId(null) }}
+                              style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: isGrouped ? '1px 8px 1px 52px' : '6px 8px', borderRadius: 8, backgroundColor: projectHoveredId === msg.id ? 'var(--bg-message-hover)' : 'transparent', position: 'relative', transition: 'background 0.1s' }}>
+
+                              {/* Avatar or spacer */}
+                              {!isGrouped && (
+                                <div style={{ flexShrink: 0, marginTop: 2 }}>
+                                  <Avatar profile={msg.sender} size={34} />
+                                </div>
+                              )}
+
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                {/* Header */}
+                                {!isGrouped && (
+                                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 3 }}>
+                                    <span style={{ fontSize: '0.88rem', fontWeight: 700, color: isMe ? '#E01E5A' : 'var(--text-primary)' }}>
+                                      {isMe ? 'You' : msg.sender?.full_name}
+                                    </span>
+                                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                      {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                    {msg.is_edited && <span style={{ fontSize: '0.65rem', color: 'var(--text-faint)', fontStyle: 'italic' }}>(edited)</span>}
+                                  </div>
+                                )}
+
+                                {/* Content / Edit mode */}
+                                {projectEditingId === msg.id ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    <div
+                                      contentEditable
+                                      suppressContentEditableWarning
+                                      dangerouslySetInnerHTML={{ __html: projectEditingContent }}
+                                      onInput={e => setProjectEditingContent(e.currentTarget.innerHTML)}
+                                      onKeyDown={e => {
+                                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveProjectChatMessage() }
+                                        if (e.key === 'Escape') { setProjectEditingId(null); setProjectEditingContent('') }
+                                      }}
+                                      style={{ backgroundColor: 'var(--bg-input)', border: '1px solid #E01E5A', borderRadius: 8, padding: '7px 10px', fontSize: '0.88rem', color: 'var(--text-primary)', outline: 'none', minHeight: 36, lineHeight: 1.6 }}
+                                    />
+                                    <div style={{ display: 'flex', gap: 6 }}>
+                                      <button onClick={saveProjectChatMessage} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', backgroundColor: '#E01E5A', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>Save</button>
+                                      <button onClick={() => { setProjectEditingId(null); setProjectEditingContent('') }} style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem' }}>Cancel</button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: '0.88rem', color: 'var(--text-primary)', lineHeight: 1.6, wordBreak: 'break-word' }} dangerouslySetInnerHTML={{ __html: msg.content }} />
+                                )}
+
+                                {/* Attachment */}
+                                {msg.attachment_url && msg.attachment_name && msg.attachment_type && (
+                                  <AttachmentBlock url={msg.attachment_url} name={msg.attachment_name} type={msg.attachment_type as 'image' | 'file'} />
+                                )}
+                              </div>
+
+                              {/* Hover action toolbar */}
+                              {projectHoveredId === msg.id && projectEditingId !== msg.id && (
+                                <div style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', gap: 2, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: 8, padding: '3px 4px', boxShadow: '0 2px 8px rgba(0,0,0,0.2)', zIndex: 10 }}>
+                                  {isMe && (
+                                    <button onClick={() => { setProjectEditingId(msg.id); setProjectEditingContent(msg.content) }}
+                                      title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '4px 6px', borderRadius: 5, display: 'flex' }}
+                                      onMouseEnter={e => e.currentTarget.style.color = 'var(--icon-hover)'}
+                                      onMouseLeave={e => e.currentTarget.style.color = 'var(--icon-color)'}>
+                                      <Pencil size={13} />
+                                    </button>
+                                  )}
+                                  {isMe && (
+                                    <button onClick={() => deleteProjectChatMessage(msg.id)}
+                                      title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '4px 6px', borderRadius: 5, display: 'flex' }}
+                                      onMouseEnter={e => e.currentTarget.style.color = '#E01E5A'}
+                                      onMouseLeave={e => e.currentTarget.style.color = 'var(--icon-color)'}>
+                                      <Trash2 size={13} />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                    <div ref={projectMessagesEndRef} style={{ height: 8 }} />
+                  </div>
+
+                  {/* ── Input Bar ── */}
+                  <div style={{ padding: '0 20px 20px', flexShrink: 0 }}>
+                    <div style={{ border: '1px solid var(--border-color)', borderRadius: 12, backgroundColor: 'var(--bg-input)', overflow: 'hidden' }}>
+                      {/* Formatting toolbar */}
+                      <FormattingToolbar textareaEl={projectEditorRef.current} setter={setProjectNewMessage} />
+
+                      {/* Attachment preview */}
+                      {projectAttachFile && (
+                        <div style={{ padding: '6px 12px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {projectAttachPreview ? (
+                            <img src={projectAttachPreview} alt="preview" style={{ width: 44, height: 44, borderRadius: 6, objectFit: 'cover', border: '1px solid var(--border-color)' }} />
+                          ) : (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 7, backgroundColor: 'var(--bg-hover)', borderRadius: 7, padding: '5px 10px', border: '1px solid var(--border-color)' }}>
+                              <Paperclip size={13} color="#E01E5A" />
+                              <span style={{ fontSize: '0.78rem', color: 'var(--text-primary)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectAttachFile.name}</span>
+                            </div>
+                          )}
+                          <button onClick={() => { setProjectAttachFile(null); setProjectAttachBytes(null); setProjectAttachPreview(null) }}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 2, display: 'flex' }}>
+                            <X size={13} />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Editor + buttons row */}
+                      <div style={{ display: 'flex', alignItems: 'flex-end', padding: '4px 8px 8px' }}>
+                        {/* Attach */}
+                        <button onClick={() => projectFileInputRef.current?.click()}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: projectAttachFile ? '#E01E5A' : 'var(--text-muted)', padding: '7px 10px', display: 'flex', alignItems: 'center', flexShrink: 0, marginRight: 4 }}>
+                          <Paperclip size={18} />
+                        </button>
+                        <input ref={projectFileInputRef} type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,.zip" style={{ display: 'none' }}
+                          onChange={e => {
+                            const f = e.target.files?.[0]
+                            if (f) handleAttachPick(f, setProjectAttachFile, setProjectAttachBytes, setProjectAttachPreview, showToast)
+                            e.target.value = ''
+                          }} />
+
+                        {/* Contenteditable editor */}
+                        <div
+                          ref={projectEditorRef}
+                          contentEditable
+                          suppressContentEditableWarning
+                          data-placeholder={`Message #${activeProject.name}`}
+                          onInput={() => {
+                            const html = projectEditorRef.current?.innerHTML ?? ''
+                            const isEmpty = !html || html === '<br>'
+                            projectNewMessageRef.current = html
+                            if (isEmpty !== isProjectEditorEmpty) setIsProjectEditorEmpty(isEmpty)
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendProjectMessage() }
+                          }}
+                          style={{ flex: 1, minHeight: 36, maxHeight: 180, overflowY: 'auto', outline: 'none', fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: '1.5', padding: '8px 4px', wordBreak: 'break-word' }}
+                        />
+
+                        {/* Send button */}
+                        <button onClick={sendProjectMessage}
+                          disabled={projectSending || projectUploading || (isProjectEditorEmpty && !projectAttachFile)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: (!isProjectEditorEmpty || projectAttachFile) ? '#E01E5A' : 'var(--text-faint)', padding: '7px 10px', display: 'flex', alignItems: 'center', flexShrink: 0, transition: 'color 0.15s' }}>
+                          {projectSending || projectUploading
+                            ? <div style={{ width: 18, height: 18, borderRadius: '50%', border: '2px solid var(--border-strong)', borderTopColor: '#E01E5A', animation: 'spin 0.7s linear infinite' }} />
+                            : <Send size={18} />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
         </div>
@@ -3913,6 +5947,231 @@ export default function WorkspacePage() {
                 >
                   {creatingChannel ? <><Loader2 size={15} className="animate-spin" /> Creating…</> : "Create Channel"}
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* ── CREATE PROJECT MODAL ── */}
+        {showCreateProject && (
+          <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+            <div style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 16, width: "100%", maxWidth: 460, padding: 28, boxShadow: "0 24px 64px rgba(0,0,0,0.4)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22 }}>
+                <span style={{ fontWeight: 700, fontSize: "1rem", color: "var(--text-primary)" }}>New Project</span>
+                <button onClick={() => setShowCreateProject(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: 4, borderRadius: 6, display: "flex" }}>
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Color picker */}
+              <div style={{ marginBottom: 18 }}>
+                <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>Color</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {["#E01E5A", "#36C5F0", "#2EB67D", "#ECB22E", "#9B59B6", "#E67E22", "#E74C3C", "#1ABC9C"].map(c => (
+                    <button key={c} onClick={() => setNewProjectColor(c)}
+                      style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: c, border: newProjectColor === c ? "3px solid var(--text-primary)" : "3px solid transparent", cursor: "pointer", transition: "border 0.15s" }} />
+                  ))}
+                </div>
+              </div>
+
+              {/* Name */}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Project Name *</div>
+                <input
+                  id="new-project-name"
+                  name="project-name"
+                  value={newProjectName}
+                  onChange={e => setNewProjectName(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && createProject()}
+                  placeholder="e.g. Website Redesign"
+                  autoFocus
+                  style={{ width: "100%", backgroundColor: "var(--bg-input)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "9px 12px", fontSize: "0.9rem", color: "var(--text-primary)", outline: "none" }}
+                  onFocus={e => e.currentTarget.style.borderColor = "#E01E5A"}
+                  onBlur={e => e.currentTarget.style.borderColor = "var(--border-color)"}
+                />
+              </div>
+
+              {/* Description */}
+              <div style={{ marginBottom: 22 }}>
+                <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Description</div>
+                <textarea
+                  id="new-project-desc"
+                  name="project-description"
+                  value={newProjectDesc}
+                  onChange={e => setNewProjectDesc(e.target.value)}
+                  placeholder="What is this project about?"
+                  rows={3}
+                  style={{ width: "100%", backgroundColor: "var(--bg-input)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "9px 12px", fontSize: "0.88rem", color: "var(--text-primary)", outline: "none", resize: "vertical", fontFamily: "inherit" }}
+                  onFocus={e => e.currentTarget.style.borderColor = "#E01E5A"}
+                  onBlur={e => e.currentTarget.style.borderColor = "var(--border-color)"}
+                />
+              </div>
+
+
+              {/* Private project toggle */}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '11px 14px', borderRadius: 9, marginBottom: 22,
+                backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
+              }}>
+                <div>
+                  <div style={{ fontSize: '0.84rem', fontWeight: 600, color: 'var(--text-primary)' }}>Private Project</div>
+                  <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                    {newProjectIsPrivate ? 'Only invited members can see this project' : 'All workspace members will be added automatically'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setNewProjectIsPrivate((p) => !p)}
+                  style={{
+                    width: 40, height: 22, borderRadius: 999, border: 'none', cursor: 'pointer', flexShrink: 0,
+                    backgroundColor: newProjectIsPrivate ? '#E01E5A' : 'var(--border-strong)',
+                    position: 'relative', transition: 'background 0.2s',
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: 3, left: newProjectIsPrivate ? 21 : 3,
+                    width: 16, height: 16, borderRadius: '50%', backgroundColor: '#fff',
+                    transition: 'left 0.2s',
+                  }} />
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setShowCreateProject(false)}
+                  style={{ padding: "8px 18px", borderRadius: 8, border: "1px solid var(--border-color)", background: "none", cursor: "pointer", color: "var(--text-secondary)", fontSize: "0.88rem", fontWeight: 500 }}>
+                  Cancel
+                </button>
+                <button onClick={createProject} disabled={!newProjectName.trim() || creatingProject}
+                  style={{ padding: "8px 22px", borderRadius: 8, border: "none", backgroundColor: newProjectName.trim() ? "#E01E5A" : "var(--bg-tertiary)", color: newProjectName.trim() ? "#fff" : "var(--text-muted)", cursor: newProjectName.trim() ? "pointer" : "not-allowed", fontSize: "0.88rem", fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                  {creatingProject ? <><div style={{ width: 14, height: 14, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", animation: "spin 0.7s linear infinite" }} />Creating…</> : "Create Project"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* ── PROJECT SETTINGS MODAL ── */}
+        {showProjectSettings && activeProject && (
+          <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+            <div style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 16, width: "100%", maxWidth: 500, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 64px rgba(0,0,0,0.4)" }}>
+              {/* Header */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 24px", borderBottom: "1px solid var(--border-color)", flexShrink: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: activeProject.color }} />
+                  <span style={{ fontWeight: 700, fontSize: "1rem", color: "var(--text-primary)" }}>Project Settings</span>
+                </div>
+                <button onClick={() => setShowProjectSettings(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: 4, borderRadius: 6, display: "flex" }}>
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Tabs */}
+              <div style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--border-color)", padding: "0 24px", flexShrink: 0 }}>
+                {(["about", "members"] as const).map(tab => (
+                  <button key={tab} onClick={() => setProjectSettingsTab(tab)}
+                    style={{ padding: "10px 16px", background: "none", border: "none", borderBottom: projectSettingsTab === tab ? "2px solid #E01E5A" : "2px solid transparent", cursor: "pointer", fontSize: "0.85rem", fontWeight: projectSettingsTab === tab ? 600 : 400, color: projectSettingsTab === tab ? "#E01E5A" : "var(--text-muted)", textTransform: "capitalize", transition: "all 0.15s", marginBottom: -1 }}>
+                    {tab}
+                  </button>
+                ))}
+              </div>
+
+              {/* Body */}
+              <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+                {projectSettingsTab === "about" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                    {/* Color */}
+                    <div>
+                      <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" }}>Color</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {["#E01E5A", "#36C5F0", "#2EB67D", "#ECB22E", "#9B59B6", "#E67E22", "#E74C3C", "#1ABC9C"].map(c => (
+                          <button key={c} onClick={() => setEditProjectColor(c)}
+                            style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: c, border: editProjectColor === c ? "3px solid var(--text-primary)" : "3px solid transparent", cursor: "pointer", transition: "border 0.15s" }} />
+                        ))}
+                      </div>
+                    </div>
+                    {/* Name */}
+                    <div>
+                      <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Name</div>
+                      <input id="edit-project-name" name="edit-project-name" value={editProjectName} onChange={e => setEditProjectName(e.target.value)}
+                        style={{ width: "100%", backgroundColor: "var(--bg-input)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "9px 12px", fontSize: "0.9rem", color: "var(--text-primary)", outline: "none" }}
+                        onFocus={e => e.currentTarget.style.borderColor = "#E01E5A"}
+                        onBlur={e => e.currentTarget.style.borderColor = "var(--border-color)"} />
+                    </div>
+                    {/* Description */}
+                    <div>
+                      <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Description</div>
+                      <textarea id="edit-project-desc" name="edit-project-description" value={editProjectDesc} onChange={e => setEditProjectDesc(e.target.value)} rows={3}
+                        style={{ width: "100%", backgroundColor: "var(--bg-input)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "9px 12px", fontSize: "0.88rem", color: "var(--text-primary)", outline: "none", resize: "vertical", fontFamily: "inherit" }}
+                        onFocus={e => e.currentTarget.style.borderColor = "#E01E5A"}
+                        onBlur={e => e.currentTarget.style.borderColor = "var(--border-color)"} />
+                    </div>
+                    {/* Save */}
+                    <button onClick={saveProjectEdit} disabled={!editProjectName.trim() || savingProject}
+                      style={{ alignSelf: "flex-end", padding: "8px 22px", borderRadius: 8, border: "none", backgroundColor: "#E01E5A", color: "#fff", cursor: "pointer", fontSize: "0.88rem", fontWeight: 600 }}>
+                      {savingProject ? "Saving…" : "Save Changes"}
+                    </button>
+                    {/* Danger zone */}
+                    <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: 16, marginTop: 8 }}>
+                      <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "#E01E5A", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Danger Zone</div>
+                      {!showDeleteProjectConfirm ? (
+                        <button onClick={() => setShowDeleteProjectConfirm(true)}
+                          style={{ padding: "8px 18px", borderRadius: 8, border: "1px solid #E01E5A", background: "none", cursor: "pointer", color: "#E01E5A", fontSize: "0.85rem", fontWeight: 600 }}>
+                          Delete Project
+                        </button>
+                      ) : (
+                        <div style={{ backgroundColor: "rgba(224,30,90,0.08)", border: "1px solid rgba(224,30,90,0.25)", borderRadius: 10, padding: 14 }}>
+                          <div style={{ fontSize: "0.85rem", color: "var(--text-primary)", marginBottom: 12 }}>
+                            Delete <strong>{activeProject.name}</strong>? This cannot be undone.
+                          </div>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button onClick={() => setShowDeleteProjectConfirm(false)}
+                              style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid var(--border-color)", background: "none", cursor: "pointer", color: "var(--text-secondary)", fontSize: "0.85rem" }}>Cancel</button>
+                            <button onClick={deleteProject}
+                              style={{ padding: "7px 16px", borderRadius: 7, border: "none", backgroundColor: "#E01E5A", color: "#fff", cursor: "pointer", fontSize: "0.85rem", fontWeight: 600 }}>Delete</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {projectSettingsTab === "members" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    {/* Current members */}
+                    <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Current Members</div>
+                    {projectMembers.map(pm => (
+                      <div key={pm.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", backgroundColor: "var(--bg-tertiary)", borderRadius: 8 }}>
+                        <Avatar profile={pm.profile} size={28} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-primary)" }}>{pm.profile?.full_name}</div>
+                          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{pm.role}</div>
+                        </div>
+                        {pm.user_id !== me?.id && (
+                          <button onClick={() => removeProjectMember(pm.user_id)}
+                            style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: 4, borderRadius: 5, display: "flex" }}
+                            onMouseEnter={e => e.currentTarget.style.color = "#E01E5A"}
+                            onMouseLeave={e => e.currentTarget.style.color = "var(--text-muted)"}>
+                            <X size={15} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+
+                    {/* Add members */}
+                    {nonProjectMembers.length > 0 && (
+                      <>
+                        <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 8 }}>Add Members</div>
+                        {nonProjectMembers.map(m => (
+                          <div key={m.user_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", backgroundColor: "var(--bg-tertiary)", borderRadius: 8 }}>
+                            <Avatar profile={m.profile} size={28} />
+                            <div style={{ flex: 1, fontSize: "0.85rem", fontWeight: 500, color: "var(--text-primary)" }}>{m.profile?.full_name}</div>
+                            <button onClick={() => addProjectMember(m.user_id)}
+                              style={{ padding: "5px 12px", borderRadius: 7, border: "none", backgroundColor: "rgba(224,30,90,0.1)", color: "#E01E5A", cursor: "pointer", fontSize: "0.8rem", fontWeight: 600 }}>
+                              Add
+                            </button>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -4394,6 +6653,775 @@ export default function WorkspacePage() {
         )}
 
       </div> {/* end main area */}
+      {/* ── ADD WORKSPACE MODAL ── */}
+      {showAddWorkspace && (
+        <div
+          onClick={e => { if (e.target === e.currentTarget) setShowAddWorkspace(false) }}
+          style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)', padding: 20, animation: 'fadeIn 0.15s ease' }}
+        >
+          <div style={{ backgroundColor: 'var(--bg-secondary)', borderRadius: 16, width: '100%', maxWidth: 420, boxShadow: '0 24px 64px rgba(0,0,0,0.4)', border: '1px solid var(--border-color)', overflow: 'hidden', animation: 'slideUp 0.2s ease' }}>
+
+            {/* Banner */}
+            <div style={{ height: 72, background: 'var(--banner-gradient)', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ fontSize: '1.5rem' }}>🏢</span>
+              <button onClick={() => setShowAddWorkspace(false)} style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(0,0,0,0.4)', border: 'none', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#fff' }}>
+                <X size={14} />
+              </button>
+            </div>
+
+            <div style={{ padding: '20px 24px 24px' }}>
+              <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>Add Workspace</h2>
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: 18 }}>Join an existing one or create a new workspace.</p>
+
+              {/* Mode toggle */}
+              <div style={{ display: 'flex', backgroundColor: 'var(--bg-tertiary)', borderRadius: 9, padding: 4, marginBottom: 20, border: '1px solid var(--border-color)' }}>
+                {(['join', 'create'] as const).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => { setAddWsMode(m); setAddWsError('') }}
+                    style={{ flex: 1, padding: '7px', borderRadius: 6, border: 'none', fontSize: '0.85rem', fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s', backgroundColor: addWsMode === m ? '#E01E5A' : 'transparent', color: addWsMode === m ? '#fff' : 'var(--text-muted)' }}
+                  >
+                    {m === 'join' ? 'Join existing' : 'Create new'}
+                  </button>
+                ))}
+              </div>
+
+              {addWsMode === 'join' ? (
+                <div>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Workspace Code</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. X4F2B7A1"
+                    value={addWsJoinCode}
+                    onChange={e => setAddWsJoinCode(e.target.value.toUpperCase())}
+                    style={{ width: '100%', padding: '10px 13px', backgroundColor: 'var(--bg-tertiary)', border: '1.5px solid var(--border-color)', borderRadius: 9, color: 'var(--text-primary)', fontSize: '1rem', fontWeight: 700, letterSpacing: '0.1em', outline: 'none', fontFamily: 'monospace' }}
+                    onFocus={e => e.target.style.borderColor = '#E01E5A'}
+                    onBlur={e => e.target.style.borderColor = 'var(--border-color)'}
+                  />
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 8 }}>Ask the workspace admin for their code.</p>
+                </div>
+              ) : (
+                <div>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Workspace Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Acme Corp"
+                    value={addWsName}
+                    onChange={e => setAddWsName(e.target.value)}
+                    style={{ width: '100%', padding: '10px 13px', backgroundColor: 'var(--bg-tertiary)', border: '1.5px solid var(--border-color)', borderRadius: 9, color: 'var(--text-primary)', fontSize: '0.92rem', outline: 'none' }}
+                    onFocus={e => e.target.style.borderColor = '#E01E5A'}
+                    onBlur={e => e.target.style.borderColor = 'var(--border-color)'}
+                  />
+                </div>
+              )}
+
+              {addWsError && (
+                <p style={{ color: '#f87171', fontSize: '0.82rem', marginTop: 12, padding: '8px 12px', backgroundColor: 'rgba(248,113,113,0.08)', borderRadius: 8 }}>{addWsError}</p>
+              )}
+
+              <button
+                onClick={handleAddWorkspace}
+                disabled={addWsLoading}
+                style={{ width: '100%', marginTop: 18, padding: '11px', borderRadius: 9, border: 'none', backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.92rem', fontWeight: 600, cursor: addWsLoading ? 'not-allowed' : 'pointer', opacity: addWsLoading ? 0.7 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7 }}
+              >
+                {addWsLoading ? <Loader2 size={16} className="animate-spin" /> : null}
+                {addWsMode === 'join' ? 'Join Workspace' : 'Create Workspace'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+{/* ── TASK DETAIL SLIDE PANEL ── */}
+{showTaskPanel && activeTask && (
+  <div style={{ position: 'fixed', inset: 0, zIndex: 90, display: 'flex', justifyContent: 'flex-end' }}>
+    <div
+      onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
+      style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)' }}
+    />
+    <div style={{
+      position: 'relative', zIndex: 91, width: 480, maxWidth: '95vw',
+      backgroundColor: 'var(--bg-secondary)', height: '100%',
+      overflowY: 'auto', boxShadow: '-4px 0 32px rgba(0,0,0,0.3)',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      {/* Header */}
+      <div style={{
+        padding: '18px 22px 14px', borderBottom: '1px solid var(--border-color)',
+        display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+      }}>
+        <TaskTypeIcon type={activeTask.type} size={18} />
+        <span style={{
+          fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+          backgroundColor: activeTask.type === 'milestone' ? 'rgba(124,58,237,0.12)' : 'rgba(59,130,246,0.12)',
+          color: activeTask.type === 'milestone' ? '#7c3aed' : '#3b82f6',
+        }}>
+          {activeTask.type === 'milestone' ? 'MILESTONE' : 'TASK'}
+        </span>
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 20 }}
+        >×</button>
+      </div>
+
+      <div style={{ padding: '20px 22px', flex: 1, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        {/* Title — editable */}
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Title</div>
+            {!editingTitle && (isProjectAdmin || me?.id === activeTask.assignee_id) && (
+              <button
+                onClick={() => { setEditingTitle(true); setTitleDraft(activeTask.title); }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex' }}
+                title="Edit title"
+              >
+                <Pencil size={12} color="var(--text-muted)" />
+              </button>
+            )}
+          </div>
+          {editingTitle ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              <input
+                autoFocus
+                value={titleDraft}
+                onChange={e => setTitleDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') saveTaskTitle();
+                  if (e.key === 'Escape') setEditingTitle(false);
+                }}
+                style={{
+                  width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
+                  backgroundColor: 'var(--bg-tertiary)', border: '1.5px solid #E01E5A',
+                  color: 'var(--text-primary)', fontSize: '1rem', fontWeight: 700, outline: 'none',
+                }}
+              />
+              <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => setEditingTitle(false)}
+                  style={{ padding: '5px 13px', borderRadius: 7, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}
+                >Cancel</button>
+                <button
+                  onClick={saveTaskTitle}
+                  disabled={!titleDraft.trim()}
+                  style={{ padding: '5px 13px', borderRadius: 7, border: 'none', backgroundColor: titleDraft.trim() ? '#E01E5A' : 'var(--bg-tertiary)', color: titleDraft.trim() ? '#fff' : 'var(--text-faint)', cursor: titleDraft.trim() ? 'pointer' : 'not-allowed', fontSize: '0.8rem', fontWeight: 700 }}
+                >Save</button>
+              </div>
+            </div>
+          ) : (
+            <div
+              onClick={() => { if (isProjectAdmin || me?.id === activeTask.assignee_id) { setEditingTitle(true); setTitleDraft(activeTask.title); } }}
+              style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.4, cursor: (isProjectAdmin || me?.id === activeTask.assignee_id) ? 'pointer' : 'default' }}
+            >
+              {activeTask.title}
+            </div>
+          )}
+        </div>
+
+        {/* Status + Priority */}
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Status</div>
+            {(isProjectAdmin || me?.id === activeTask.assignee_id) ? (
+              <select
+                value={activeTask.status}
+                onChange={(e) => updateTaskStatus(activeTask.id, e.target.value as TaskStatus)}
+                style={{
+                  width: '100%', padding: '6px 10px', borderRadius: 7,
+                  backgroundColor: STATUS_CONFIG[activeTask.status].bg,
+                  color: STATUS_CONFIG[activeTask.status].color,
+                  border: `1px solid ${STATUS_CONFIG[activeTask.status].color}44`,
+                  fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', outline: 'none',
+                }}
+              >
+                {(Object.entries(STATUS_CONFIG) as [TaskStatus, { label: string; color: string; bg: string }][]).map(([k, v]) => (
+                  <option key={k} value={k}>{v.label}</option>
+                ))}
+              </select>
+            ) : (
+              <span style={{
+                display: 'inline-block', padding: '3px 10px', borderRadius: 999,
+                backgroundColor: STATUS_CONFIG[activeTask.status].bg,
+                color: STATUS_CONFIG[activeTask.status].color,
+                fontSize: '0.78rem', fontWeight: 700,
+              }}>
+                {STATUS_CONFIG[activeTask.status].label}
+              </span>
+            )}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Priority</div>
+            <span style={{
+              display: 'inline-block', padding: '3px 10px', borderRadius: 999,
+              backgroundColor: 'var(--bg-tertiary)', color: PRIORITY_CONFIG[activeTask.priority].color,
+              fontSize: '0.78rem', fontWeight: 700,
+            }}>
+              {PRIORITY_CONFIG[activeTask.priority].label}
+            </span>
+          </div>
+        </div>
+
+        {/* Assignee + Due */}
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Assigned To</div>
+            {activeTask.assignee ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <div style={{
+                  width: 26, height: 26, borderRadius: '50%', backgroundColor: '#E01E5A',
+                  color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.72rem', fontWeight: 700, overflow: 'hidden', flexShrink: 0,
+                }}>
+                  {activeTask.assignee.avatar_url
+                    ? <img src={activeTask.assignee.avatar_url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                    : activeTask.assignee.full_name?.[0]}
+                </div>
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 500 }}>{activeTask.assignee.full_name}</span>
+              </div>
+            ) : (
+              <span style={{ color: 'var(--text-faint)', fontSize: '0.82rem' }}>Unassigned</span>
+            )}
+          </div>
+          {activeTask.due_date && (
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Due Date</div>
+              <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                {new Date(activeTask.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Description */}
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Description</div>
+            {!editingDescription && (isProjectAdmin || me?.id === activeTask.assignee_id) && (
+              <button
+                onClick={() => { setEditingDescription(true); setDescriptionDraft(activeTask.description || ''); }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex' }}
+                title="Edit description"
+              >
+                <Pencil size={12} color="var(--text-muted)" />
+              </button>
+            )}
+          </div>
+
+          {editingDescription ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <textarea
+                autoFocus
+                placeholder="Add a description…"
+                value={descriptionDraft}
+                onChange={(e) => setDescriptionDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveTaskDescription(); }
+                  if (e.key === 'Escape') { setEditingDescription(false); }
+                }}
+                style={{
+                  width: '100%', padding: '10px 12px', borderRadius: 10, minHeight: 100,
+                  backgroundColor: 'var(--bg-tertiary)', border: '1px solid #E01E5A',
+                  color: 'var(--text-primary)', fontSize: '0.87rem', lineHeight: 1.65,
+                  outline: 'none', resize: 'vertical', fontFamily: 'inherit'
+                }}
+              />
+              <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => setEditingDescription(false)}
+                  style={{ padding: '6px 14px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}
+                >Cancel</button>
+                <button
+                  onClick={saveTaskDescription}
+                  style={{ padding: '6px 14px', borderRadius: 8, border: 'none', backgroundColor: '#E01E5A', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700 }}
+                >Save</button>
+              </div>
+            </div>
+          ) : activeTask.description ? (
+            <p
+              onClick={() => { if (isProjectAdmin || me?.id === activeTask.assignee_id) { setEditingDescription(true); setDescriptionDraft(activeTask.description || ''); } }}
+              style={{ margin: 0, fontSize: '0.87rem', color: 'var(--text-secondary)', lineHeight: 1.65, whiteSpace: 'pre-wrap', cursor: (isProjectAdmin || me?.id === activeTask.assignee_id) ? 'pointer' : 'default' }}
+            >
+              {activeTask.description}
+            </p>
+          ) : (isProjectAdmin || me?.id === activeTask.assignee_id) ? (
+            <button
+              onClick={() => { setEditingDescription(true); setDescriptionDraft(''); }}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: '1.5px dashed var(--border-color)', background: 'none', color: 'var(--text-muted)', fontSize: '0.84rem', cursor: 'pointer', fontStyle: 'italic' }}
+            >Click to add a description…</button>
+          ) : null}
+        </div>
+
+        {/* Creation attachment — shown if task was created with a file */}
+        {activeTask.attachment_url && (
+          <div style={{ marginTop: 4 }}>
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+              Attached File
+            </div>
+            {activeTask.attachment_type === 'image' ? (
+              <a href={activeTask.attachment_url} target="_blank" rel="noopener noreferrer">
+                <img
+                  src={activeTask.attachment_url}
+                  alt={activeTask.attachment_name ?? 'attachment'}
+                  style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 8, objectFit: 'cover', border: '1px solid var(--border-color)' }}
+                />
+              </a>
+            ) : (
+              <a
+                href={activeTask.attachment_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 7,
+                  padding: '7px 12px', borderRadius: 8, fontSize: '0.8rem', fontWeight: 600,
+                  backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
+                  color: 'var(--text-primary)', textDecoration: 'none',
+                }}
+              >
+                <Paperclip size={13} color="var(--text-muted)" />
+                {activeTask.attachment_name ?? 'Download file'}
+                <ExternalLink size={11} color="var(--text-faint)" />
+              </a>
+            )}
+          </div>
+        )}
+
+        {/* ── MILESTONE SECTION ── */}
+        {activeTask.type === 'milestone' && (
+          <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Milestone Progress
+            </div>
+
+            {/* Previous submission */}
+            {activeTask.submission_text && (
+              <div style={{ backgroundColor: 'var(--bg-tertiary)', borderRadius: 9, padding: '11px 13px', border: '1px solid var(--border-color)' }}>
+                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', marginBottom: 5 }}>
+                  Work Submitted
+                  {activeTask.submitted_at && ` • ${new Date(activeTask.submitted_at).toLocaleDateString()}`}
+                  {(activeTask.revision_count ?? 0) > 0 && ` • Revision #${activeTask.revision_count}`}
+                </div>
+                <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>
+                  {activeTask.submission_text}
+                </p>
+                {activeTask.submission_url && (
+                  <div style={{ marginTop: 8 }}>
+                    {activeTask.submission_url.match(/\.(jpg|jpeg|png|gif|webp)$/i) || activeTask.submission_url.includes('/image/') ? (
+                      <a href={activeTask.submission_url} target="_blank" rel="noopener noreferrer">
+                        <img
+                          src={activeTask.submission_url}
+                          alt={activeTask.submission_filename ?? 'Submitted image'}
+                          style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 7, objectFit: 'cover', border: '1px solid var(--border-color)' }}
+                        />
+                      </a>
+                    ) : (
+                      <a
+                        href={activeTask.submission_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6,
+                          padding: '6px 12px', borderRadius: 7,
+                          backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
+                          color: 'var(--text-primary)', textDecoration: 'none',
+                          fontSize: '0.77rem', fontWeight: 600,
+                        }}
+                      >
+                        <Paperclip size={13} />
+                        {activeTask.submission_filename ?? 'View Attachment'}
+                        <ExternalLink size={11} style={{ color: 'var(--text-muted)' }} />
+                      </a>
+                    )}
+                  </div>
+                )}
+
+              </div>
+            )}
+
+            {/* Revision note */}
+            {activeTask.revision_note && activeTask.status === 'changes_requested' && (
+              <div style={{ backgroundColor: 'rgba(239,68,68,0.07)', borderRadius: 9, padding: '11px 13px', border: '1px solid rgba(239,68,68,0.2)' }}>
+                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', marginBottom: 5 }}>🔄 Changes Requested</div>
+                <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>{activeTask.revision_note}</p>
+              </div>
+            )}
+
+            {/* ASSIGNEE: Submit work — shown for both task and milestone when assignee and status allows */}
+            {me?.id === activeTask.assignee_id
+              && ['open', 'active', 'changes_requested'].includes(activeTask.status)
+              && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {/* Label */}
+                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Submit Work
+                </div>
+
+                {/* Text area */}
+                <textarea
+                  placeholder={activeTask.type === 'milestone' ? 'Describe completed work...' : 'Add a note (optional)...'}
+                  value={submitText}
+                  onChange={e => setSubmitText(e.target.value)}
+                  rows={3}
+                  style={{
+                    width: '100%', padding: '9px 11px', borderRadius: 8, boxSizing: 'border-box',
+                    backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                    color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
+                  }}
+                />
+
+                {/* File attachment area */}
+                <div
+                  onClick={() => submitFileInputRef.current?.click()}
+                  style={{
+                    border: `1.5px dashed ${submitFile ? '#E01E5A' : 'var(--border-color)'}`, borderRadius: 8,
+                    padding: submitFile ? '8px 12px' : '9px 12px',
+                    display: 'flex', alignItems: 'center', gap: 9,
+                    cursor: 'pointer', backgroundColor: 'var(--bg-tertiary)',
+                    transition: 'border-color 0.15s',
+                  }}
+                  onMouseEnter={e => !submitFile && (e.currentTarget.style.borderColor = '#E01E5A')}
+                  onMouseLeave={e => !submitFile && (e.currentTarget.style.borderColor = 'var(--border-color)')}
+                >
+                  {submitFile ? (
+                    <>
+                      {submitPreview ? (
+                        <img
+                          src={submitPreview}
+                          alt="preview"
+                          style={{ width: 34, height: 34, objectFit: 'cover', borderRadius: 5, flexShrink: 0 }}
+                        />
+                      ) : (
+                        <div style={{
+                          width: 34, height: 34, borderRadius: 5, flexShrink: 0,
+                          backgroundColor: 'var(--bg-secondary)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <Paperclip size={15} style={{ color: 'var(--text-muted)' }} />
+                        </div>
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {submitFile.name}
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          {(submitFile.size / 1024 / 1024).toFixed(2)} MB
+                        </div>
+                      </div>
+                      <button
+                        onClick={e => { e.stopPropagation(); setSubmitFile(null); setSubmitBytes(null); setSubmitPreview(null); }}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <Paperclip size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                      <span style={{ fontSize: '0.77rem', color: 'var(--text-muted)' }}>
+                        Attach a file <span style={{ color: 'var(--text-faint)', fontSize: '0.71rem' }}>(optional · max 7.5 MB)</span>
+                      </span>
+                    </>
+                  )}
+                </div>
+                <input
+                  ref={submitFileInputRef}
+                  type="file"
+                  style={{ display: 'none' }}
+                  onChange={async e => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    if (f.size > 7.5 * 1024 * 1024) { showToast('File exceeds 7.5 MB limit.', 'error'); return; }
+                    const bytes = await f.arrayBuffer();
+                    setSubmitFile(f);
+                    setSubmitBytes(bytes);
+                    setSubmitPreview(f.type.startsWith('image/') ? URL.createObjectURL(f) : null);
+                    e.target.value = '';
+                  }}
+                />
+
+                {/* Submit button */}
+                <button
+                  onClick={submitMilestoneWork}
+                  disabled={submittingTask || (!submitText.trim() && !submitFile)}
+                  style={{
+                    padding: '8px 18px', borderRadius: 8, fontWeight: 700, fontSize: '0.82rem', border: 'none',
+                    alignSelf: 'flex-end',
+                    backgroundColor: (submitText.trim() || submitFile) ? '#E01E5A' : 'var(--bg-tertiary)',
+                    color: (submitText.trim() || submitFile) ? '#fff' : 'var(--text-faint)',
+                    cursor: (submitText.trim() || submitFile) && !submittingTask ? 'pointer' : 'not-allowed',
+                    opacity: submittingTask ? 0.7 : 1,
+                  }}
+                >
+                  {submittingTask ? 'Submitting...' : 'Submit Work'}
+                </button>
+              </div>
+            )}
+
+
+
+            {/* ADMIN: In Review actions */}
+            {isProjectAdmin && activeTask.status === 'in_review' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {showRevisionInput ? (
+                  <>
+                    <textarea
+                      autoFocus
+                      placeholder="Describe what needs to be changed…"
+                      value={revisionNote}
+                      onChange={(e) => setRevisionNote(e.target.value)}
+                      rows={3}
+                      style={{
+                        width: '100%', padding: '9px 11px', borderRadius: 8, boxSizing: 'border-box',
+                        backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                        color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: 7 }}>
+                      <button onClick={() => { setShowRevisionInput(false); setRevisionNote('') }}
+                        style={{ flex: 1, padding: '7px', borderRadius: 7, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
+                        Cancel
+                      </button>
+                      <button onClick={requestTaskRevision} disabled={submittingTask || !revisionNote.trim()}
+                        style={{ flex: 2, padding: '7px', borderRadius: 7, backgroundColor: '#ef4444', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem' }}>
+                        {submittingTask ? 'Sending…' : '🔄 Request Changes'}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', gap: 7 }}>
+                    <button onClick={() => setShowRevisionInput(true)}
+                      style={{ flex: 1, padding: '8px', borderRadius: 8, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
+                      🔄 Request Changes
+                    </button>
+                    <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
+                      style={{ flex: 1, padding: '8px', borderRadius: 8, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem' }}>
+                      ✅ Approve & Complete
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ADMIN: Mark complete on open/active milestone */}
+            {isProjectAdmin && ['open', 'active'].includes(activeTask.status) && (
+              <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
+                style={{ padding: '8px', borderRadius: 8, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem' }}>
+                ✅ Mark Complete
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* TASK: simple complete button */}
+        {activeTask.type === 'task' && activeTask.status !== 'complete' && (
+          <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
+            style={{ padding: '10px', borderRadius: 9, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.86rem', marginTop: 'auto' }}>
+            ✅ Mark as Complete
+          </button>
+        )}
+
+        {/* Delete (admin only) */}
+        {isProjectAdmin && (
+          <button onClick={() => deleteProjectTask(activeTask.id)}
+            style={{ padding: '7px', borderRadius: 8, backgroundColor: 'transparent', border: '1px solid rgba(239,68,68,0.3)', color: '#ef4444', cursor: 'pointer', fontSize: '0.77rem', fontWeight: 600 }}>
+            Delete {activeTask.type === 'milestone' ? 'Milestone' : 'Task'}
+          </button>
+        )}
+      </div>
+    </div>
+  </div>
+)}
+
+{/* ── CREATE TASK / MILESTONE MODAL ── */}
+{showCreateTask && (
+  <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div onClick={() => setShowCreateTask(false)} style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.55)' }} />
+    <div style={{
+      position: 'relative', zIndex: 101, width: 500, maxWidth: '95vw',
+      backgroundColor: 'var(--bg-secondary)', borderRadius: 16,
+      padding: '26px 26px 22px', boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 22 }}>
+        <TaskTypeIcon type={newTaskType} size={18} />
+        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+          Create {newTaskType === 'milestone' ? 'Milestone' : 'Task'}
+        </h3>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+          {(['task', 'milestone'] as const).map((t) => (
+            <button key={t} onClick={() => setNewTaskType(t)}
+              style={{
+                padding: '5px 13px', fontSize: '0.73rem', fontWeight: 700, border: 'none', cursor: 'pointer',
+                backgroundColor: newTaskType === t ? '#E01E5A' : 'transparent',
+                color: newTaskType === t ? '#fff' : 'var(--text-muted)',
+              }}>
+              {t === 'milestone' ? 'Milestone' : 'Task'}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setShowCreateTask(false)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 18, padding: '0 0 0 8px' }}>×</button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+        {/* Title */}
+        <div>
+          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Title *</label>
+          <input
+            autoFocus
+            value={newTaskTitle}
+            onChange={(e) => setNewTaskTitle(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') createProjectTask() }}
+            placeholder={newTaskType === 'milestone' ? 'e.g. Complete API Integration' : 'e.g. Review design mockups'}
+            style={{
+              width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
+              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+              color: 'var(--text-primary)', fontSize: '0.88rem', outline: 'none',
+            }}
+          />
+        </div>
+
+        {/* Description */}
+        <div>
+          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Description</label>
+          <textarea
+            value={newTaskDesc}
+            onChange={(e) => setNewTaskDesc(e.target.value)}
+            rows={3}
+            placeholder="Optional details…"
+            style={{
+              width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
+              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+              color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
+            }}
+          />
+        </div>
+
+        {/* Assignee + Priority */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
+          <div>
+            <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Assign To</label>
+            <select
+              value={newTaskAssigneeId}
+              onChange={(e) => setNewTaskAssigneeId(e.target.value)}
+              style={{
+                width: '100%', padding: '7px 10px', borderRadius: 8, boxSizing: 'border-box',
+                backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
+              }}
+            >
+              <option value="">Unassigned</option>
+              {projectMembers.map((m: any) => (
+                <option key={m.user_id} value={m.user_id}>
+                  {m.profile?.full_name ?? m.user_id}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Priority</label>
+            <select
+              value={newTaskPriority}
+              onChange={(e) => setNewTaskPriority(e.target.value as TaskPriority)}
+              style={{
+                width: '100%', padding: '7px 10px', borderRadius: 8, boxSizing: 'border-box',
+                backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
+              }}
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Due date */}
+        <div>
+          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Due Date (optional)</label>
+          <input
+            type="date"
+            value={newTaskDueDate}
+            onChange={(e) => setNewTaskDueDate(e.target.value)}
+            style={{
+              width: '100%', padding: '7px 11px', borderRadius: 8, boxSizing: 'border-box',
+              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+              color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
+            }}
+          />
+        </div>
+        {/* Attachment */}
+        <div>
+          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>
+            Attach File <span style={{ fontWeight: 400, color: 'var(--text-faint)' }}>(optional, max 7.5MB)</span>
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={() => newTaskFileInputRef.current?.click()}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '7px 13px', borderRadius: 8, fontSize: '0.78rem', fontWeight: 600,
+                cursor: 'pointer', backgroundColor: 'var(--bg-tertiary)',
+                border: '1px solid var(--border-color)', color: 'var(--text-muted)',
+              }}
+            >
+              <Paperclip size={13} />
+              {newTaskFile ? 'Change File' : 'Attach File'}
+            </button>
+            {newTaskFile && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                  {newTaskFile.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setNewTaskFile(null); setNewTaskBytes(null); }}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0, display: 'flex' }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )}
+          </div>
+          <input
+            ref={newTaskFileInputRef}
+            type="file"
+            style={{ display: 'none' }}
+            onChange={async e => {
+              const f = e.target.files?.[0];
+              if (!f) return;
+              if (f.size > 7.5 * 1024 * 1024) { showToast('File exceeds 7.5MB limit', 'error'); return; }
+              const bytes = await f.arrayBuffer();
+              setNewTaskFile(f);
+              setNewTaskBytes(bytes);
+            }}
+          />
+        </div>
+        {/* Buttons */}
+        <div style={{ display: 'flex', gap: 9, marginTop: 4 }}>
+          <button onClick={() => setShowCreateTask(false)}
+            style={{ flex: 1, padding: '9px', borderRadius: 9, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.86rem' }}>
+            Cancel
+          </button>
+          <button
+            onClick={createProjectTask}
+            disabled={creatingTask || !newTaskTitle.trim()}
+            style={{
+              flex: 2, padding: '9px', borderRadius: 9, fontWeight: 700, fontSize: '0.86rem', border: 'none',
+              backgroundColor: newTaskTitle.trim() ? '#E01E5A' : 'var(--bg-tertiary)',
+              color: newTaskTitle.trim() ? '#fff' : 'var(--text-faint)',
+              cursor: newTaskTitle.trim() ? 'pointer' : 'not-allowed',
+            }}
+          >
+            {creatingTask ? 'Creating…' : `Create ${newTaskType === 'milestone' ? 'Milestone' : 'Task'}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+)}
 
       <ToastNotification />
     </div> /* end root column wrapper */
