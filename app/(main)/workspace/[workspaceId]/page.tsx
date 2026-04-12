@@ -1,17 +1,18 @@
 "use client";
 
-import { useEffect, useState, useRef, useMemo, type ReactNode } from "react";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import React, { useEffect, useState, useRef, useMemo, useCallback, type ReactNode, Suspense } from "react";
+import { useParams, useRouter, useSearchParams, usePathname } from "next/navigation";
 import ReactDOM from "react-dom";
 import {
   MessageSquare, Globe, Plus, ChevronDown, LogOut,
   Send, Paperclip, Settings, Users, Lock, X, Check,
   Loader2, MoreHorizontal, Pin, User, Copy, Sun, Moon,
   Monitor, Pencil, Trash2, Upload, MailOpen, Smile, CheckSquare, Calendar,
-  LayoutDashboard, Milestone, CheckSquare2, ClipboardList, Flag, UserPlus, RefreshCcw, CheckCircle2, ExternalLink,
+  LayoutDashboard, Milestone, CheckSquare2, ClipboardList, Flag, UserPlus, RefreshCcw, CheckCircle2, ExternalLink, Shield,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useRequireAuth } from "@/lib/useAuth";
+import { WorkspaceInfoModal } from '@/components/workspace/WorkspaceInfoModal';
 
 // ─── Types ───────────────────────────────────────────────
 type Profile = {
@@ -67,7 +68,7 @@ type Message = {
 type Member = {
   user_id: string;
   role: string;
-  profile?: Profile;
+  profile?: Profile | null;
   is_online?: boolean;
 };
 type DM = {
@@ -76,6 +77,7 @@ type DM = {
   created_at: string;
   sender_id: string;
   receiver_id: string;
+  workspace_id?: string | null;
   attachment_url?: string | null;
   attachment_name?: string | null;
   attachment_type?: string | null;
@@ -116,6 +118,11 @@ type ProjectMessage = {
   updated_at?: string | null;
   is_edited?: boolean;
   sender?: Profile | null;
+  is_pinned?: boolean;
+  parent_message_id?: string | null;
+  parent_snapshot?: any | null;
+  is_system?: boolean;
+  event_meta?: any | null;
 };
 
 type TaskType = 'task' | 'milestone';
@@ -341,11 +348,14 @@ function TaskTypeIcon({
 }
 
 // ─── Component ───────────────────────────────────────────
-export default function WorkspacePage() {
+function WorkspacePage() {
   const { checking, userId } = useRequireAuth();
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
+
+
   const initialChannelId = searchParams.get("channel");
 
   // ── View mode ──
@@ -433,7 +443,7 @@ export default function WorkspacePage() {
 
   // ── Mention autocomplete ──
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const [mentionDropdownFor, setMentionDropdownFor] = useState<"channel" | "dm" | null>(null);
+  const [mentionDropdownFor, setMentionDropdownFor] = useState<"channel" | "dm" | "project" | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const mentionDropdownRef = useRef<HTMLDivElement>(null);
   const mentionAnchorRef = useRef<{ top: number; left: number; width: number }>({ top: 0, left: 0, width: 0 });
@@ -565,6 +575,9 @@ export default function WorkspacePage() {
   const [showAddWorkspace, setShowAddWorkspace] = useState(false);
   const workspaceSwitcherRef = useRef<HTMLDivElement>(null);
   const projectTabRef = useRef<'overview' | 'chat'>('overview');
+  const viewRef = useRef<View>("channel");
+  const activeProjectRef = useRef<Project | null>(null);
+  const activeDmUserIdRef = useRef<string | null>(null);
 
   const [addWsMode, setAddWsMode] = useState<'create' | 'join'>('join');
   const [addWsName, setAddWsName] = useState('');
@@ -600,12 +613,14 @@ export default function WorkspacePage() {
   // ── Reply state ──
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [dmReplyingTo, setDmReplyingTo] = useState<DM & { sendername?: string } | null>(null);
+  const [projectReplyingTo, setProjectReplyingTo] = useState<ProjectMessage | null>(null);
 
   const showToast = (message: string, type: 'error' | 'success' | 'info' = 'error') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast({ message, type });
     toastTimerRef.current = setTimeout(() => setToast(null), 4000);
   };
+
 
   useEffect(() => {
     if (me) loadProjectUnreadCounts();
@@ -640,6 +655,18 @@ export default function WorkspacePage() {
     activeChannelRef.current = activeChannel;
     if (activeChannel) markChannelAsRead(activeChannel.id);
   }, [activeChannel]);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
+
+  useEffect(() => {
+    activeDmUserIdRef.current = activeDmUserId;
+  }, [activeDmUserId]);
 
   useEffect(() => {
     return () => {
@@ -770,8 +797,13 @@ export default function WorkspacePage() {
     }
     const key = [me.id, activeDmUserId].sort().join("-");
     const sub = supabase
-      .channel(`dm-${key}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "direct_messages" }, payload => {
+      .channel(`dm-${workspaceId}-${key}`)   // workspace-scoped channel name
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "direct_messages",
+        filter: `workspace_id=eq.${workspaceId}`,  // ✅ workspace filter
+      }, payload => {
         const msg = payload.new as DM;
         const isRelevant =
           (msg.sender_id === me.id && msg.receiver_id === activeDmUserId) ||
@@ -790,7 +822,12 @@ export default function WorkspacePage() {
           }, 50);
         }
       })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "direct_messages" }, payload => {
+      .on("postgres_changes", {
+        event: "UPDATE",
+        schema: "public",
+        table: "direct_messages",
+        filter: `workspace_id=eq.${workspaceId}`,  // ✅ workspace filter
+      }, payload => {
         const updated = payload.new as DM;
         setDmMessages(prev => prev.map(m => m.id === updated.id ? updated : m));
       })
@@ -929,7 +966,7 @@ export default function WorkspacePage() {
   };
 
   // Open a project (switch to project view)
-  const openProject = async (project: Project) => {
+  const openProject = async (project: Project, tab: 'overview' | 'chat' = 'overview') => {
     // Clean up previous project subscriptions
     if (projectSubRef.current) {
       supabase.removeChannel(projectSubRef.current);
@@ -945,17 +982,16 @@ export default function WorkspacePage() {
     setActiveChannel(null);
     setActiveDmUserId(null);
     setActiveDmUser(null);
-    switchProjectTab('overview');
+    switchProjectTab(tab);
+    const url = `/workspace/${workspaceId}?project=${project.id}`;
+    router.replace(url, { scroll: false });
+    localStorage.setItem(`trexaflow_last_${workspaceId}`, url);
     setProjectMessages([]);
     await loadProjectMembers(project.id);
     await loadProjectMessages(project.id);
     await loadProjectTasks(project.id);
     subscribeToProjectTasks(project.id);
     subscribeToProjectMessages(project.id);
-    // Clear sidebar badge immediately on open
-    setProjectChatUnread(prev => ({ ...prev, [project.id]: 0 }));
-    // Clear badge when opening project (overview tab is shown first, but mark read anyway)
-    markProjectChatRead(project.id);
   };
 
 
@@ -1052,11 +1088,12 @@ export default function WorkspacePage() {
     await loadProjectMembers(activeProject.id);
   };
 
-  // Load project messages
+
+
   const loadProjectMessages = async (projectId: string) => {
     setProjectMsgLoading(true);
     const { data } = await supabase
-      .from('messages')
+      .from('project_messages')
       .select('*, sender:users(*)')
       .eq('project_id', projectId)
       .order('created_at');
@@ -1077,9 +1114,10 @@ export default function WorkspacePage() {
 
     const sub = supabase
       .channel('project-chat-' + projectId)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `project_id=eq.${projectId}` },
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'project_messages', filter: `project_id=eq.${projectId}` },
         async (payload: any) => {
           const msg = payload.new as any;
+          if (msg.sender_id === me?.id && !msg.is_system) return; // own chat messages handled optimistically, system messages need the subscription
 
           // Fetch sender for non-system messages sent by others
           let senderProfile = null;
@@ -1103,10 +1141,11 @@ export default function WorkspacePage() {
 
           // Badge: if user is on this project but NOT on the chat tab, increment unread
           // Also badge sidebar if user is on a different project entirely
+          // Use refs — never stale, always current
           const isViewingThisProjectChat =
-            (view as string) === 'project' &&
-            activeProject?.id === projectId &&
-            projectTab === 'chat';
+            viewRef.current === 'project' &&
+            activeProjectRef.current?.id === projectId &&
+            projectTabRef.current === 'chat';
 
           if (!isViewingThisProjectChat && msg.sender_id !== me?.id) {
             setProjectChatUnread(prev => ({
@@ -1116,13 +1155,13 @@ export default function WorkspacePage() {
           }
         }
       )
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `project_id=eq.${projectId}` },
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'project_messages', filter: `project_id=eq.${projectId}` },
         (payload: any) => {
           const updated = payload.new as any;
           setProjectMessages(prev => prev.map(m => m.id === updated.id ? { ...m, ...updated } : m));
         }
       )
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' },
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'project_messages' },
         (payload: any) => {
           setProjectMessages(prev => prev.filter(m => m.id !== (payload.old as any).id));
         }
@@ -1134,19 +1173,20 @@ export default function WorkspacePage() {
 
   // Send project message
   const sendProjectMessage = async () => {
+    const optimisticId = `temp-${Date.now()}`;
     const editorEl = projectEditorRef.current;
     if (!editorEl || !me || !activeProject || projectSending || projectUploading) return;
-  
+
     const html = editorEl.innerHTML;
     const content = sanitizeHtml(html);
     if (!content.trim() && !projectAttachFile) return;
-  
+
     editorEl.innerHTML = '';
     projectNewMessageRef.current = '';
     setIsProjectEditorEmpty(true);
     setProjectNewMessage('');
     setProjectSending(true);
-  
+
     let attachData: { url: string; name: string; type: 'image' | 'file' } | null = null;
     if (projectAttachFile && projectAttachBytes) {
       setProjectUploading(true);
@@ -1160,46 +1200,52 @@ export default function WorkspacePage() {
       }
       setProjectAttachFile(null); setProjectAttachBytes(null); setProjectAttachPreview(null);
     }
-  
-    const optimisticId = `opt-${Date.now()}`;
+
     const optimistic = {
       id: optimisticId,
-      project_id: activeProject.id,       // ✅ was: projectid
-      sender_id: me.id,                   // ✅ was: senderid
+      project_id: activeProject.id,
+      sender_id: me.id,
       content: content.trim() || null,
-      attachment_url: attachData?.url ?? null,   // ✅ was: attachmenturl
-      attachment_name: attachData?.name ?? null, // ✅ was: attachmentname
-      attachment_type: attachData?.type ?? null, // ✅ was: attachmenttype
-      created_at: new Date().toISOString(),      // ✅ was: createdat
+      attachment_url: attachData?.url ?? null,
+      attachment_name: attachData?.name ?? null,
+      attachment_type: attachData?.type ?? null,
+      created_at: new Date().toISOString(),
       sender: me,
+      parent_message_id: projectReplyingTo?.id ?? null,
+      parent_snapshot: projectReplyingTo
+        ? { sendername: projectReplyingTo.sender?.full_name ?? 'Unknown', content: projectReplyingTo.content }
+        : null,
     } as any;
     setProjectMessages((prev) => [...prev, optimistic]);
     setTimeout(() => {
       if (projectMessagesContainerRef.current)
         projectMessagesContainerRef.current.scrollTop = projectMessagesContainerRef.current.scrollHeight;
     }, 50);
-  
+
     const { data: inserted } = await supabase
-      .from('messages')                    // ✅ was: projectmessages
+      .from('project_messages')
       .insert({
         project_id: activeProject.id,
         sender_id: me.id,
-        channel_id: null,
         content: content.trim() || '',
         is_pinned: false,
-        is_system: false,
         attachment_url: attachData?.url ?? null,
         attachment_name: attachData?.name ?? null,
         attachment_type: attachData?.type ?? null,
+        parent_message_id: projectReplyingTo?.id ?? null,
+        parent_snapshot: projectReplyingTo
+          ? { sendername: projectReplyingTo.sender?.full_name ?? 'Unknown', content: projectReplyingTo.content }
+          : null,
       })
       .select('*, sender:users(*)')
       .single();
-  
+
     if (inserted) {
       setProjectMessages((prev) =>
         prev.map((m) => m.id === optimisticId ? inserted : m)
       );
     }
+    setProjectReplyingTo(null);
     setProjectSending(false);
   };
 
@@ -1208,8 +1254,8 @@ export default function WorkspacePage() {
     if (!projectEditingId || !projectEditingContent.trim()) return;
     const content = sanitizeHtml(projectEditingContent);
     await supabase
-      .from('messages')                    // ✅ was: projectmessages
-      .update({ content, is_edited: true, updated_at: new Date().toISOString() }) // ✅ was: isedited, updatedat
+      .from('project_messages')
+      .update({ content, is_edited: true, updated_at: new Date().toISOString() })
       .eq('id', projectEditingId);
     setProjectMessages((prev) =>
       prev.map((m) => m.id === projectEditingId ? { ...m, content, is_edited: true } : m)
@@ -1220,7 +1266,7 @@ export default function WorkspacePage() {
 
   // Delete project message
   const deleteProjectChatMessage = async (id: string) => {
-    await supabase.from('messages').delete().eq('id', id); // ✅ was: projectmessages
+    await supabase.from('project_messages').delete().eq('id', id);
     setProjectMessages((prev) => prev.filter((m) => m.id !== id));
     setProjectOpenMenuId(null);
   };
@@ -1238,9 +1284,8 @@ export default function WorkspacePage() {
       assignedbyname?: string;
     }
   ) => {
-    const { error } = await supabase.from('messages').insert({
+    const { error } = await supabase.from('project_messages').insert({
       project_id: projectid,
-      channel_id: null,
       sender_id: me!.id,
       content: eventtype,          // non-empty string satisfies NOT NULL
       is_pinned: false,
@@ -1311,9 +1356,10 @@ export default function WorkspacePage() {
       projectIds.map(async (pid: string) => {
         const lastRead = readMap[pid];
         let query = supabase
-          .from('messages')
-          .select('id', { count: 'exact', head: true })
-          .eq('project_id', pid);
+          .from('project_messages')
+          .select('*', { count: 'exact', head: true })
+          .eq('project_id', pid)
+          .eq('is_system', false);
         if (lastRead) {
           query = query.gt('created_at', lastRead);
         }
@@ -1351,6 +1397,7 @@ export default function WorkspacePage() {
         async (payload: any) => {
           if (payload.eventType === 'INSERT') {
             const t = payload.new as ProjectTask;
+            if (t.created_by === me?.id) return; // own tasks handled optimistically
             let withAssignee = t;
             if (t.assignee_id) {
               const { data: a } = await supabase.from('users').select('*').eq('id', t.assignee_id).single();
@@ -1380,6 +1427,10 @@ export default function WorkspacePage() {
   // Create task or milestone
   const createProjectTask = async () => {
     if (!activeProject || !newTaskTitle.trim() || !me) return;
+    if (!newTaskAssigneeId) {
+      showToast('Please select a team member to assign this task.', 'error');
+      return;
+    }
     setCreatingTask(true);
 
     // Upload attachment if present
@@ -1660,21 +1711,56 @@ export default function WorkspacePage() {
     await fetchUnreadCounts(chans);
     await loadMembers();
 
-    // Active channel
-    const targetChannel = initialChannelId
-      ? chans.find(c => c.id === initialChannelId) || chans.find(c => c.is_default) || chans[0]
-      : chans.find(c => c.is_default) || chans[0];
-
-    if (targetChannel) {
-      setActiveChannel(targetChannel);
-      markChannelAsRead(targetChannel.id);
-      await loadChannelMessages(targetChannel.id);
-    }
-
-    // Load projects
+    // Load projects FIRST to ensure state is ready if needed
     await loadProjects(currentUserId);
     subscribeToWorkspaceProjects(currentUserId);
     await loadProjectUnreadCounts();
+
+    const urlChannel = searchParams.get('channel');
+    const urlDm = searchParams.get('dm');
+    const urlProject = searchParams.get('project');
+
+    let handled = false;
+
+    if (!urlChannel && !urlDm && !urlProject) {
+      const saved = localStorage.getItem(`trexaflow_last_${workspaceId}`);
+      if (saved) {
+        router.replace(saved, { scroll: false });
+        // Parse what was explicitly saved
+        const savedUrl = new URL(saved, window.location.origin);
+        const savedCh = savedUrl.searchParams.get('channel');
+        const savedDm = savedUrl.searchParams.get('dm');
+        const savedProj = savedUrl.searchParams.get('project');
+
+        if (savedCh) {
+          const ch = chans.find(c => c.id === savedCh);
+          if (ch) { await switchChannel(ch); handled = true; }
+        } else if (savedDm) {
+          await openDm(savedDm);
+          handled = true;
+        } else if (savedProj) {
+          const { data: proj } = await supabase.from('projects').select('*').eq('id', savedProj).single();
+          if (proj) { await openProject(proj); handled = true; }
+        }
+      }
+    }
+
+    if (!handled) {
+      // Fallback or explicit URL passed
+      if (urlDm) {
+        await openDm(urlDm);
+      } else if (urlProject) {
+        const { data: proj } = await supabase.from('projects').select('*').eq('id', urlProject).single();
+        if (proj) await openProject(proj);
+      } else {
+        const startChannel =
+          chans.find(c => c.id === urlChannel) ??
+          chans.find(c => c.is_default) ??
+          chans[0];
+
+        if (startChannel) await switchChannel(startChannel);
+      }
+    }
 
     setLoading(false);
 
@@ -1790,11 +1876,16 @@ export default function WorkspacePage() {
         // If user is currently viewing the deleted channel, bounce to lobby
         setActiveChannel(prev => {
           if (prev?.id === deletedId) {
-            const lobby = channels.find(c => c.is_default);
-            if (lobby) switchChannel(lobby);
             return null;
           }
           return prev;
+        });
+        setChannels(prev => {
+          const updated = prev.filter(c => c.id !== deletedId);
+          // Find lobby from the fresh list
+          const lobby = updated.find(c => c.is_default) ?? updated[0];
+          if (lobby && activeChannel?.id === deletedId) switchChannel(lobby);
+          return updated;
         });
       })
       .subscribe();
@@ -1811,6 +1902,9 @@ export default function WorkspacePage() {
 
           if (payload.eventType === "INSERT") {
             const msg = payload.new as Message;
+            // Never badge or append your own messages
+            if (msg.sender_id === meIdRef.current && meIdRef.current !== null) return;
+
             if (msg.channel_id !== ch.id) {
               setUnreadCounts(prev => ({
                 ...prev,
@@ -1825,7 +1919,6 @@ export default function WorkspacePage() {
               }
               return;
             }
-            if (msg.sender_id === meIdRef.current && meIdRef.current !== null) return;
             const { data: sender } = await supabase
               .from("users").select("*").eq("id", msg.sender_id).single();
             setMessages(prev => {
@@ -1856,19 +1949,21 @@ export default function WorkspacePage() {
     }
 
     const allDmSub = supabase
-      .channel(`all-dm-watcher-${currentUserId}`)
+      .channel(`all-dm-watcher-${workspaceId}-${currentUserId}`)  // ✅ workspace-scoped
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "direct_messages",
-          filter: `receiver_id=eq.${currentUserId}`,
+          filter: `receiver_id=eq.${currentUserId}`,  // Supabase only supports one filter — we guard workspace in handler
         },
         payload => {
           const msg = payload.new as DM;
+          if (msg.workspace_id !== workspaceId) return; // ✅ ignore DMs from other workspaces
           // If user is already looking at this DM conversation, don't badge
-          if (msg.sender_id === activeDmUserId) return;
+          if (msg.sender_id === currentUserId) return; // never badge own messages
+          if (msg.sender_id === activeDmUserIdRef.current) return; // already viewing
           setDmUnreadCounts(prev => {
             const updated = { ...prev, [msg.sender_id]: (prev[msg.sender_id] || 0) + 1 };
             if (typeof window !== "undefined") {
@@ -1976,6 +2071,12 @@ export default function WorkspacePage() {
     setMessages([]);
     setUnreadFromMessageId(null);
     markChannelAsRead(channel.id);
+
+    // ✅ ADD THIS — update URL without a full navigation
+    const url = `/workspace/${workspaceId}?channel=${channel.id}`;
+    router.replace(url, { scroll: false });
+    localStorage.setItem(`trexaflow_last_${workspaceId}`, url);
+
     await loadChannelMessages(channel.id);
   };
 
@@ -2006,6 +2107,9 @@ export default function WorkspacePage() {
 
     // Update presence indicator for DM header
     setIsOtherOnline(onlineUsers.has(userId));
+    const url = `/workspace/${workspaceId}?dm=${userId}`;
+    router.replace(url, { scroll: false });
+    localStorage.setItem(`trexaflow_last_${workspaceId}`, url);
 
     if (me) await loadDmMessages(me.id, userId);
   };
@@ -2015,6 +2119,7 @@ export default function WorkspacePage() {
     let query = supabase
       .from("direct_messages")
       .select("*")
+      .eq("workspace_id", workspaceId)  // ✅ scope to current workspace
       .order("created_at");
 
     if (myId === otherId) {
@@ -2039,8 +2144,10 @@ export default function WorkspacePage() {
     });
   };
 
-  const isAdmin = me?.id === workspace?.owner_id ||
-    members.find(m => m.user_id === me?.id)?.role === "admin";
+  const isSuperAdmin = me?.id === workspace?.owner_id;
+  const isWorkspaceAdmin = isSuperAdmin || members.find(m => m.user_id === me?.id)?.role === 'admin';
+  // Keep isAdmin as alias for backward compat with existing code
+  const isAdmin = isWorkspaceAdmin;
 
   // ─── Load workspace members ───────────────────────────────
   const loadMembers = async () => {
@@ -2230,6 +2337,7 @@ export default function WorkspacePage() {
     const { data: sent, error } = await supabase
       .from("direct_messages")
       .insert({
+        workspace_id: workspaceId,      // ✅ scope to current workspace
         sender_id: me.id,
         receiver_id: activeDmUserId,
         content,
@@ -2311,6 +2419,21 @@ export default function WorkspacePage() {
   };
 
   // ─── Toggle pin ───────────────────────────────────────────
+  // Pin a project chat message (uses project_messages table)
+  const togglePinProjectMessage = async (msg: ProjectMessage) => {
+    const { data } = await supabase
+      .from('project_messages')
+      .update({ is_pinned: !msg.is_pinned })
+      .eq('id', msg.id)
+      .select()
+      .single();
+    if (data) {
+      setProjectMessages(prev =>
+        prev.map(m => m.id === data.id ? { ...m, is_pinned: data.is_pinned } : m)
+      );
+    }
+  };
+
   const togglePinMessage = async (msg: Message) => {
     const { data } = await supabase
       .from("messages")
@@ -2414,6 +2537,21 @@ export default function WorkspacePage() {
     setDmMessages(prev => prev.filter(m => m.id !== msgId));
   };
 
+  const markProjectMessageAsUnread = (msg: ProjectMessage) => {
+    if (!activeProject) return;
+    setProjectOpenMenuId(null);
+    setProjectHoveredId(null);
+    const justBefore = new Date(new Date(msg.created_at).getTime() - 1).toISOString();
+    const msgsAfter = projectMessages.filter(m => m.created_at > msg.created_at);
+    setProjectChatUnread(prev => ({ ...prev, [activeProject.id]: msgsAfter.length }));
+
+    supabase.from('project_chat_reads').upsert({
+      user_id: me?.id,
+      project_id: activeProject.id,
+      last_read_at: justBefore
+    }).then();
+  };
+
   // ─── Mark DM as unread ────────────────────────────────────
   const markDmAsUnread = (msg: DM) => {
     setDmOpenMenuMessageId(null);
@@ -2436,13 +2574,13 @@ export default function WorkspacePage() {
   const mentionMembers = useMemo(() => {
     if (mentionQuery === null) return [];
     const q = mentionQuery.toLowerCase();
-    const pool = mentionDropdownFor === "dm"
-      ? members.filter(m => m.user_id !== me?.id)
-      : members;
+    let pool = members;
+    if (mentionDropdownFor === "dm") pool = members.filter(m => m.user_id !== me?.id);
+    if (mentionDropdownFor === "project") pool = projectMembers as unknown as Member[];
     return pool
       .filter(m => m.profile?.full_name?.toLowerCase().includes(q))
       .slice(0, 6);
-  }, [mentionQuery, mentionDropdownFor, members, me]);
+  }, [mentionQuery, mentionDropdownFor, members, projectMembers, me]);
 
   const insertMention = (member: Member, editorEl: HTMLDivElement) => {
     const sel = window.getSelection();
@@ -2732,6 +2870,24 @@ export default function WorkspacePage() {
       .eq("channel_id", activeChannel.id)
       .eq("user_id", userId);
     await loadChannelMembers();
+  };
+
+  const updateWorkspaceMemberRole = async (targetUserId: string, newRole: 'admin' | 'member') => {
+    // Super admin (owner) can never be demoted
+    if (targetUserId === workspace?.owner_id) return;
+    // Only super admin or admin can change roles
+    if (!isWorkspaceAdmin) return;
+    const { error } = await supabase
+      .from('workspace_members')
+      .update({ role: newRole })
+      .eq('workspace_id', workspaceId)
+      .eq('user_id', targetUserId);
+    if (!error) {
+      setMembers(prev =>
+        prev.map(m => m.user_id === targetUserId ? { ...m, role: newRole } : m)
+      );
+      showToast(`Role updated to ${newRole === 'admin' ? 'Admin' : 'Member'}`, 'success');
+    }
   };
 
   // ─── Leave workspace ──────────────────────────────────────
@@ -3047,6 +3203,11 @@ export default function WorkspacePage() {
     // Poll document.queryCommandState to sync active format indicators
     useEffect(() => {
       const update = () => {
+        if (!textareaEl || document.activeElement !== textareaEl) {
+          setActiveFormats({ bold: false, italic: false, underline: false, strike: false });
+          return;
+        }
+
         try {
           setActiveFormats({
             bold: document.queryCommandState('bold'),
@@ -3058,8 +3219,13 @@ export default function WorkspacePage() {
       };
 
       document.addEventListener('selectionchange', update);
-      return () => document.removeEventListener('selectionchange', update);
-    }, []);
+      textareaEl?.addEventListener('blur', update);
+
+      return () => {
+        document.removeEventListener('selectionchange', update);
+        textareaEl?.removeEventListener('blur', update);
+      };
+    }, [textareaEl]);
 
     const btn = (
       label: ReactNode,
@@ -3288,23 +3454,25 @@ export default function WorkspacePage() {
   const canManageChannel = !!activeChannel;
 
   const STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; bg: string }> = {
-    open:               { label: 'Open',             color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
-    active:             { label: 'Active',            color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
-    in_review:          { label: 'In Review',         color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-    changes_requested:  { label: 'Changes Requested', color: '#ef4444', bg: 'rgba(239,68,68,0.12)'  },
-    complete:           { label: 'Complete',          color: '#22c55e', bg: 'rgba(34,197,94,0.12)'  },
+    open: { label: 'Open', color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
+    active: { label: 'Active', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' },
+    in_review: { label: 'In Review', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+    changes_requested: { label: 'Changes Requested', color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
+    complete: { label: 'Complete', color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
   };
 
   const PRIORITY_CONFIG: Record<TaskPriority, { label: string; color: string }> = {
-    low:    { label: 'Low',    color: '#6b7280' },
+    low: { label: 'Low', color: '#6b7280' },
     medium: { label: 'Medium', color: '#f59e0b' },
-    high:   { label: 'High',   color: '#ef4444' },
+    high: { label: 'High', color: '#ef4444' },
     urgent: { label: 'Urgent', color: '#7c3aed' },
   };
 
-  const isProjectAdmin =
-    me?.id === activeProject?.created_by ||
-    projectMembers.find((m: any) => m.user_id === me?.id)?.role === 'admin';
+  const isProjectAdmin = useMemo(
+    () => me?.id === activeProject?.created_by ||
+      projectMembers.find((m: any) => m.user_id === me?.id)?.role === 'admin',
+    [me?.id, activeProject?.created_by, projectMembers]
+  );
 
   const filteredTasks = useMemo(() => {
     return projectTasks.filter((t) => {
@@ -3313,6 +3481,8 @@ export default function WorkspacePage() {
       return t.status === taskFilter;
     });
   }, [projectTasks, taskFilter]);
+
+
 
   // ─── Loading screen ───────────────────────────────────────
   if (loading || checking) return (
@@ -3457,7 +3627,7 @@ export default function WorkspacePage() {
     type,
   }: {
     editorRef: React.RefObject<HTMLDivElement | null>;
-    type: "channel" | "dm";
+    type: "channel" | "dm" | "project";
   }) => {
     if (mentionQuery === null || mentionDropdownFor !== type || mentionMembers.length === 0) return null;
 
@@ -3548,6 +3718,18 @@ export default function WorkspacePage() {
   const resolvedLogoTheme = themeMode === 'system'
     ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : themeMode;
+
+  const actionBtn = (color?: string, hoverBg?: string) => ({
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: color ?? 'var(--icon-color)',
+    padding: '5px 6px',
+    borderRadius: 6,
+    display: 'flex',
+    alignItems: 'center',
+    transition: 'background 0.1s, color 0.1s',
+  } as React.CSSProperties);
 
   return (
     <div
@@ -3803,12 +3985,14 @@ export default function WorkspacePage() {
                     )}
                   </div>
                   {/* Add channel */}
-                  <button onClick={() => setShowCreateChannel(true)} title="Create channel"
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center' }}
-                    onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
-                    onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
-                    <Plus size={14} strokeWidth={2.5} />
-                  </button>
+                  {isAdmin && (
+                    <button onClick={() => setShowCreateChannel(true)} title="Create channel"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center' }}
+                      onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                      onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
+                      <Plus size={14} strokeWidth={2.5} />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -3836,7 +4020,7 @@ export default function WorkspacePage() {
                           </span>
                         )}
                         {unread > 0 && mentions === 0 && (
-                          <span style={{ backgroundColor: 'var(--text-muted)', color: 'var(--bg-primary)', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
+                          <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
                             {unread}
                           </span>
                         )}
@@ -3968,32 +4152,51 @@ export default function WorkspacePage() {
             {/* ─── PROJECTS SECTION ─── */}
             <div style={{ marginBottom: 4 }}>
               {/* Section header */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px 4px 14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', padding: '0 8px 4px', gap: 2 }}>
                 <button
                   onClick={() => {
                     const next = !sidebarProjectsOpen;
                     setSidebarProjectsOpen(next);
                     saveSidebarCollapse(sidebarChannelsOpen, sidebarDmsOpen, next);
                   }}
-                  style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '3px 4px', borderRadius: 5, flex: 1, textAlign: 'left' }}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', padding: '4px 4px', borderRadius: 6, color: 'var(--text-muted)' }}
                   onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
                   onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                    style={{ transition: 'transform 0.2s', transform: sidebarProjectsOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }}>
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Projects</span>
+                  <ChevronDown
+                    size={13}
+                    style={{ transition: 'transform 0.2s', transform: sidebarProjectsOpen ? 'rotate(0deg)' : 'rotate(-90deg)', flexShrink: 0 }}
+                  />
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                    Projects
+                  </span>
                 </button>
-                {/* Add project — wired in Phase 3 */}
+
+                {/* Refresh button */}
                 <button
-                  onClick={() => setShowCreateProject(true)}
-                  title="Create project"
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', borderRadius: 4, display: 'flex', alignItems: 'center' }}
-                  onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
-                  onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
-                  <Plus size={14} strokeWidth={2.5} />
+                  onClick={async () => {
+                    if (me) await loadProjects(me.id);
+                  }}
+                  title="Refresh projects"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted)')}
+                >
+                  <RefreshCcw size={13} />
                 </button>
+
+                {/* Create project — only for admins */}
+                {isAdmin && (
+                  <button
+                    onClick={() => setShowCreateProject(true)}
+                    title="New project"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, borderRadius: 6, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted)')}
+                  >
+                    <Plus size={14} />
+                  </button>
+                )}
               </div>
 
               {/* Projects list — dynamic */}
@@ -4014,10 +4217,12 @@ export default function WorkspacePage() {
                       </svg>
                       <span style={{ fontSize: '0.72rem', color: 'var(--text-faint)', textAlign: 'center', lineHeight: 1.4 }}>
                         No projects yet.<br />
-                        <span
-                          style={{ color: '#E01E5A', cursor: 'pointer', textDecoration: 'underline' }}
-                          onClick={() => setShowCreateProject(true)}
-                        >Create one</span>
+                        {isAdmin && (
+                          <span
+                            style={{ color: '#E01E5A', cursor: 'pointer', textDecoration: 'underline' }}
+                            onClick={() => setShowCreateProject(true)}
+                          >Create one</span>
+                        )}
                       </span>
                     </div>
                   ) : (
@@ -4128,21 +4333,23 @@ export default function WorkspacePage() {
               )}
 
               {/* Channel settings */}
-              <button
-                onClick={() => {
-                  setEditChannelName(activeChannel.name);
-                  setEditChannelDesc(activeChannel.description ?? "");
-                  setEditChannelPrivate(activeChannel.is_private);
-                  setChannelSettingsTab("about");
-                  setShowChannelSettings(true);
-                }}
-                title="Channel settings"
-                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "7px", borderRadius: 8, display: "flex", alignItems: "center", transition: "all 0.15s" }}
-                onMouseEnter={e => { e.currentTarget.style.color = "var(--icon-hover)"; e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
-                onMouseLeave={e => { e.currentTarget.style.color = "var(--icon-color)"; e.currentTarget.style.backgroundColor = "transparent"; }}
-              >
-                <Settings size={17} />
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    setEditChannelName(activeChannel.name);
+                    setEditChannelDesc(activeChannel.description ?? "");
+                    setEditChannelPrivate(activeChannel.is_private);
+                    setChannelSettingsTab("about");
+                    setShowChannelSettings(true);
+                  }}
+                  title="Channel settings"
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "7px", borderRadius: 8, display: "flex", alignItems: "center", transition: "all 0.15s" }}
+                  onMouseEnter={e => { e.currentTarget.style.color = "var(--icon-hover)"; e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.color = "var(--icon-color)"; e.currentTarget.style.backgroundColor = "transparent"; }}
+                >
+                  <Settings size={17} />
+                </button>
+              )}
 
               {/* Theme picker */}
               <div ref={themePickerRef} style={{ position: "relative" }}>
@@ -4315,6 +4522,9 @@ export default function WorkspacePage() {
                           </div>
                         ))}
                       </div>
+                      <div style={{ display: 'flex', justifyContent: 'center', marginTop: 16 }}>
+                        <WorkspaceInfoModal />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -4425,44 +4635,47 @@ export default function WorkspacePage() {
 
                         {/* Message action toolbar */}
                         {hoveredMessage === msg.id && editingMessageId !== msg.id && (
-                          <div ref={menuRef} style={{ position: "absolute", top: 4, right: 8, display: "flex", gap: 2, backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "2px", boxShadow: "0 4px 12px var(--shadow-color)", zIndex: 10 }}>
+                          <div
+                            ref={menuRef}
+                            onMouseLeave={() => { setHoveredMessage(null); setOpenMenuMessageId(null); }}
+                            style={{
+                              position: 'absolute', top: 4, right: 8, display: 'flex', alignItems: 'center',
+                              gap: 2, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+                              borderRadius: 8, padding: '2px 3px', boxShadow: '0 4px 12px var(--shadow-color)', zIndex: 10
+                            }}
+                          >
+                            {openMenuMessageId === msg.id && (
+                              <>
+                                <button title="Reply" onClick={() => { setReplyingTo(msg); setOpenMenuMessageId(null); }} style={actionBtn()}>
+                                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" /></svg>
+                                </button>
+                                {isMe && (
+                                  <button title="Edit" onClick={() => { setEditingMessageId(msg.id); setEditingContent(msg.content); setOpenMenuMessageId(null); }} style={actionBtn()}>
+                                    <Pencil size={14} />
+                                  </button>
+                                )}
+                                {(isAdmin) && (
+                                  <button title={msg.is_pinned ? 'Unpin' : 'Pin'} onClick={() => togglePinMessage(msg)} style={actionBtn(msg.is_pinned ? '#E01E5A' : undefined)}>
+                                    <Pin size={14} />
+                                  </button>
+                                )}
+                                <button title="Mark as unread" onClick={() => markAsUnread(msg)} style={actionBtn()}>
+                                  <MailOpen size={14} />
+                                </button>
+                                {isMe && (
+                                  <button title="Delete" onClick={() => deleteMessage(msg.id)} style={actionBtn('#f87171', 'rgba(248,113,113,0.08)')}>
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                              </>
+                            )}
                             <button
-                              title="Reply"
-                              onClick={() => setReplyingTo(msg)}
-                              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-primary)", padding: "4px 6px", borderRadius: 6, display: "flex", alignItems: "center" }}
-                              onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                              onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
+                              title="More actions"
+                              onClick={() => setOpenMenuMessageId(prev => prev === msg.id ? null : msg.id)}
+                              style={actionBtn(openMenuMessageId === msg.id ? '#E01E5A' : undefined)}
                             >
-                              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" />
-                              </svg>
+                              <MoreHorizontal size={15} />
                             </button>
-                            {isMe && (
-                              <button onClick={() => { setEditingMessageId(msg.id); setEditingContent(msg.content); setOpenMenuMessageId(null); }}
-                                title="Edit" style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: "var(--icon-color)", display: "flex", alignItems: "center" }}
-                                onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                                onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                              ><Pencil size={14} /></button>
-                            )}
-                            {me?.id === workspace?.owner_id && (
-                              <button onClick={() => togglePinMessage(msg)}
-                                title={msg.is_pinned ? "Unpin" : "Pin"} style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: msg.is_pinned ? "#E01E5A" : "var(--icon-color)", display: "flex", alignItems: "center" }}
-                                onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                                onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                              ><Pin size={14} /></button>
-                            )}
-                            <button onClick={() => markAsUnread(msg)}
-                              title="Mark as unread" style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: "var(--icon-color)", display: "flex", alignItems: "center" }}
-                              onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                              onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                            ><MailOpen size={14} /></button>
-                            {isMe && (
-                              <button onClick={() => deleteMessage(msg.id)}
-                                title="Delete" style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: "#f87171", display: "flex", alignItems: "center" }}
-                                onMouseEnter={e => e.currentTarget.style.backgroundColor = "rgba(248,113,113,0.08)"}
-                                onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                              ><Trash2 size={14} /></button>
-                            )}
                           </div>
                         )}
                       </div>
@@ -4765,37 +4978,42 @@ export default function WorkspacePage() {
 
                         {/* DM message action toolbar */}
                         {dmHoveredMessage === msg.id && dmEditingMessageId !== msg.id && (
-                          <div ref={dmMenuRef} style={{ position: "absolute", top: 4, right: 8, display: "flex", gap: 2, backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 8, padding: "2px", boxShadow: "0 4px 12px var(--shadow-color)", zIndex: 10 }}>
+                          <div
+                            ref={dmMenuRef}
+                            onMouseLeave={() => { setDmHoveredMessage(null); setDmOpenMenuMessageId(null); }}
+                            style={{
+                              position: 'absolute', top: 4, right: 8, display: 'flex', alignItems: 'center',
+                              gap: 2, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+                              borderRadius: 8, padding: '2px 3px', boxShadow: '0 4px 12px var(--shadow-color)', zIndex: 10
+                            }}
+                          >
+                            {dmOpenMenuMessageId === msg.id && (
+                              <>
+                                <button title="Reply" onClick={() => { setDmReplyingTo({ ...msg, sendername: isMe ? (me?.full_name ?? 'You') : (activeDmUser?.full_name ?? 'User') }); setDmOpenMenuMessageId(null); }} style={actionBtn()}>
+                                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" /></svg>
+                                </button>
+                                {isMe && (
+                                  <button title="Edit" onClick={() => { setDmEditingMessageId(msg.id); setDmEditingContent(msg.content); setDmOpenMenuMessageId(null); }} style={actionBtn()}>
+                                    <Pencil size={14} />
+                                  </button>
+                                )}
+                                <button title="Mark as unread" onClick={() => markDmAsUnread(msg)} style={actionBtn()}>
+                                  <MailOpen size={14} />
+                                </button>
+                                {isMe && (
+                                  <button title="Delete" onClick={() => deleteDmMessage(msg.id)} style={actionBtn('#f87171', 'rgba(248,113,113,0.08)')}>
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                              </>
+                            )}
                             <button
-                              title="Reply"
-                              onClick={() => setDmReplyingTo({ ...msg, sendername: msg.sender_id === me?.id ? (me?.full_name ?? 'You') : (activeDmUser?.full_name ?? 'User') })}
-                              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "4px 6px", borderRadius: 6, display: "flex", alignItems: "center" }}
-                              onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                              onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
+                              title="More actions"
+                              onClick={() => setDmOpenMenuMessageId(prev => prev === msg.id ? null : msg.id)}
+                              style={actionBtn(dmOpenMenuMessageId === msg.id ? '#E01E5A' : undefined)}
                             >
-                              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" />
-                              </svg>
+                              <MoreHorizontal size={15} />
                             </button>
-                            {isMe && (
-                              <button onClick={() => { setDmEditingMessageId(msg.id); setDmEditingContent(msg.content); setDmOpenMenuMessageId(null); }}
-                                title="Edit" style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: "var(--icon-color)", display: "flex", alignItems: "center" }}
-                                onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                                onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                              ><Pencil size={14} /></button>
-                            )}
-                            <button onClick={() => markDmAsUnread(msg)}
-                              title="Mark as unread" style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: "var(--icon-color)", display: "flex", alignItems: "center" }}
-                              onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
-                              onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                            ><MailOpen size={14} /></button>
-                            {isMe && (
-                              <button onClick={() => deleteDmMessage(msg.id)}
-                                title="Delete" style={{ background: "none", border: "none", cursor: "pointer", padding: "5px 7px", borderRadius: 6, color: "#f87171", display: "flex", alignItems: "center" }}
-                                onMouseEnter={e => e.currentTarget.style.backgroundColor = "rgba(248,113,113,0.08)"}
-                                onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                              ><Trash2 size={14} /></button>
-                            )}
                           </div>
                         )}
                       </div>
@@ -5015,13 +5233,15 @@ export default function WorkspacePage() {
                   )}
                 </div>
                 {/* Settings */}
-                <button
-                  onClick={() => { setEditProjectName(activeProject.name); setEditProjectDesc(activeProject.description ?? ''); setEditProjectColor(activeProject.color); setProjectSettingsTab('about'); setShowProjectSettings(true) }}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '7px', borderRadius: 8, display: 'flex', alignItems: 'center', transition: 'all 0.15s' }}
-                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--icon-hover)'; e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
-                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--icon-color)'; e.currentTarget.style.backgroundColor = 'transparent' }}>
-                  <Settings size={17} />
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => { setEditProjectName(activeProject.name); setEditProjectDesc(activeProject.description ?? ''); setEditProjectColor(activeProject.color); setProjectSettingsTab('about'); setShowProjectSettings(true) }}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '7px', borderRadius: 8, display: 'flex', alignItems: 'center', transition: 'all 0.15s' }}
+                    onMouseEnter={e => { e.currentTarget.style.color = 'var(--icon-hover)'; e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
+                    onMouseLeave={e => { e.currentTarget.style.color = 'var(--icon-color)'; e.currentTarget.style.backgroundColor = 'transparent' }}>
+                    <Settings size={17} />
+                  </button>
+                )}
               </div>
 
               {/* ── Tab Bar ── */}
@@ -5032,7 +5252,7 @@ export default function WorkspacePage() {
                     <button key={tab} onClick={() => switchProjectTab(tab)}
                       style={{ padding: '10px 18px', background: 'none', border: 'none', borderBottom: projectTab === tab ? '2px solid #E01E5A' : '2px solid transparent', cursor: 'pointer', fontSize: '0.85rem', fontWeight: projectTab === tab ? 600 : 400, color: projectTab === tab ? '#E01E5A' : 'var(--text-muted)', textTransform: 'capitalize', transition: 'all 0.15s', marginBottom: -1, display: 'flex', alignItems: 'center', gap: 6 }}>
                       {tab === 'overview' ? <LayoutDashboard size={14} /> : <MessageSquare size={14} />}
-                      {tab}
+                      {tab === 'chat' ? 'Discussions' : tab}
                       {unread > 0 && (
                         <span style={{
                           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -5109,14 +5329,14 @@ export default function WorkspacePage() {
                       >
                         {f === 'all' ? 'All'
                           : f === 'task' ? 'Tasks'
-                          : f === 'milestone' ? 'Milestones'
-                          : f === 'in_review' ? 'In Review'
-                          : f === 'changes_requested' ? 'Changes Req.'
-                          : f.charAt(0).toUpperCase() + f.slice(1)}
+                            : f === 'milestone' ? 'Milestones'
+                              : f === 'in_review' ? 'In Review'
+                                : f === 'changes_requested' ? 'Changes Req.'
+                                  : f.charAt(0).toUpperCase() + f.slice(1)}
                       </button>
                     ))}
                     <div style={{ flex: 1 }} />
-                    {isProjectAdmin && (
+                    {isAdmin && (
                       <>
                         <button
                           onClick={() => { setNewTaskType('task'); setShowCreateTask(true) }}
@@ -5127,18 +5347,18 @@ export default function WorkspacePage() {
                           }}
                         >
                           <CheckSquare2 size={13} />
-                          Add Task
+                          Create Task
                         </button>
                         <button
                           onClick={() => { setNewTaskType('milestone'); setShowCreateTask(true) }}
                           style={{
                             display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px',
-                            backgroundColor: '#E01E5A', border: 'none',
-                            borderRadius: 8, fontSize: '0.8rem', fontWeight: 600, color: '#fff', cursor: 'pointer',
+                            backgroundColor: 'var(--bg-secondary)', border: 'none',
+                            borderRadius: 8, fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer',
                           }}
                         >
                           <Milestone size={13} />
-                          Add Milestone
+                          Create Milestone
                         </button>
                       </>
                     )}
@@ -5256,16 +5476,16 @@ export default function WorkspacePage() {
                     ) : (
                       projectMessages.map((msg, i) => {
 
-                        {/* SYSTEM EVENT CARD */}
+                        {/* SYSTEM EVENT CARD */ }
                         if ((msg as any).is_system && (msg as any).event_meta) {
                           const ev = (msg as any).event_meta;
                           const isMilestone = ev.tasktype === 'milestone';
 
                           const EVENT_META_MAP: Record<string, { label: string; color: string; bg: string; borderColor: string }> = {
-                            taskassigned:          { label: isMilestone ? 'Milestone Assigned'    : 'Task Assigned',       color: '#3b82f6', bg: 'rgba(59,130,246,0.06)',  borderColor: 'rgba(59,130,246,0.2)'  },
-                            tasksubmitted:         { label: isMilestone ? 'Milestone Submitted'   : 'Work Submitted',       color: '#f59e0b', bg: 'rgba(245,158,11,0.06)', borderColor: 'rgba(245,158,11,0.2)'  },
-                            taskchangesrequested: { label: 'Changes Requested',                                            color: '#ef4444', bg: 'rgba(239,68,68,0.06)',   borderColor: 'rgba(239,68,68,0.2)'   },
-                            taskcompleted:        { label: isMilestone ? 'Milestone Completed'   : 'Task Completed',       color: '#22c55e', bg: 'rgba(34,197,94,0.06)',   borderColor: 'rgba(34,197,94,0.2)'   },
+                            taskassigned: { label: isMilestone ? 'Milestone Assigned' : 'Task Assigned', color: '#3b82f6', bg: 'rgba(59,130,246,0.06)', borderColor: 'rgba(59,130,246,0.2)' },
+                            tasksubmitted: { label: isMilestone ? 'Milestone Submitted' : 'Work Submitted', color: '#f59e0b', bg: 'rgba(245,158,11,0.06)', borderColor: 'rgba(245,158,11,0.2)' },
+                            taskchangesrequested: { label: 'Changes Requested', color: '#ef4444', bg: 'rgba(239,68,68,0.06)', borderColor: 'rgba(239,68,68,0.2)' },
+                            taskcompleted: { label: isMilestone ? 'Milestone Completed' : 'Task Completed', color: '#22c55e', bg: 'rgba(34,197,94,0.06)', borderColor: 'rgba(34,197,94,0.2)' },
                           };
 
                           const ec = EVENT_META_MAP[ev.eventtype] ?? { label: ev.eventtype, color: '#6b7280', bg: 'rgba(107,114,128,0.06)', borderColor: 'rgba(107,114,128,0.2)' };
@@ -5276,11 +5496,11 @@ export default function WorkspacePage() {
                             const to = ev.assignedtoname || 'a member';
                             const typeLabel = isMilestone ? 'milestone' : 'task';
                             switch (ev.eventtype) {
-                              case 'taskassigned':          return <><strong>{by}</strong> assigned a {typeLabel} to <strong>{to}</strong></>;
-                              case 'tasksubmitted':         return <><strong>{to}</strong> submitted work on a {typeLabel}</>;
+                              case 'taskassigned': return <><strong>{by}</strong> assigned a {typeLabel} to <strong>{to}</strong></>;
+                              case 'tasksubmitted': return <><strong>{to}</strong> submitted work on a {typeLabel}</>;
                               case 'taskchangesrequested': return <>Changes were requested on a {typeLabel}</>;
-                              case 'taskcompleted':        return <>A {typeLabel} was marked complete</>;
-                              default:                      return <>Activity on a {typeLabel}</>;
+                              case 'taskcompleted': return <>A {typeLabel} was marked complete</>;
+                              default: return <>Activity on a {typeLabel}</>;
                             }
                           })();
 
@@ -5439,7 +5659,7 @@ export default function WorkspacePage() {
                                 {!isGrouped && (
                                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 3 }}>
                                     <span style={{ fontSize: '0.88rem', fontWeight: 700, color: isMe ? '#E01E5A' : 'var(--text-primary)' }}>
-                                      {isMe ? 'You' : msg.sender?.full_name}
+                                      {msg.sender?.full_name}
                                     </span>
                                     <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
                                       {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -5479,23 +5699,47 @@ export default function WorkspacePage() {
 
                               {/* Hover action toolbar */}
                               {projectHoveredId === msg.id && projectEditingId !== msg.id && (
-                                <div style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', gap: 2, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: 8, padding: '3px 4px', boxShadow: '0 2px 8px rgba(0,0,0,0.2)', zIndex: 10 }}>
-                                  {isMe && (
-                                    <button onClick={() => { setProjectEditingId(msg.id); setProjectEditingContent(msg.content) }}
-                                      title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '4px 6px', borderRadius: 5, display: 'flex' }}
-                                      onMouseEnter={e => e.currentTarget.style.color = 'var(--icon-hover)'}
-                                      onMouseLeave={e => e.currentTarget.style.color = 'var(--icon-color)'}>
-                                      <Pencil size={13} />
-                                    </button>
+                                <div
+                                  ref={projectMenuRef}
+                                  onMouseLeave={() => { setProjectHoveredId(null); setProjectOpenMenuId(null); }}
+                                  style={{
+                                    position: 'absolute', top: 4, right: 8, display: 'flex', alignItems: 'center',
+                                    gap: 2, backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+                                    borderRadius: 8, padding: '2px 3px', boxShadow: '0 4px 12px var(--shadow-color)', zIndex: 10
+                                  }}
+                                >
+                                  {projectOpenMenuId === msg.id && (
+                                    <>
+                                      <button title="Reply" onClick={() => { setProjectReplyingTo(msg); setProjectOpenMenuId(null); }} style={actionBtn()}>
+                                        <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round"><polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" /></svg>
+                                      </button>
+                                      {isMe && (
+                                        <button title="Edit" onClick={() => { setProjectEditingId(msg.id); setProjectEditingContent(msg.content); setProjectOpenMenuId(null); }} style={actionBtn()}>
+                                          <Pencil size={14} />
+                                        </button>
+                                      )}
+                                      {isAdmin && (
+                                        <button title={msg.is_pinned ? 'Unpin' : 'Pin'} onClick={() => togglePinProjectMessage(msg)} style={actionBtn(msg.is_pinned ? '#E01E5A' : undefined)}>
+                                          <Pin size={14} />
+                                        </button>
+                                      )}
+                                      <button title="Mark as unread" onClick={() => markProjectMessageAsUnread(msg)} style={actionBtn()}>
+                                        <MailOpen size={14} />
+                                      </button>
+                                      {isMe && (
+                                        <button title="Delete" onClick={() => deleteProjectChatMessage(msg.id)} style={actionBtn('#f87171', 'rgba(248,113,113,0.08)')}>
+                                          <Trash2 size={14} />
+                                        </button>
+                                      )}
+                                    </>
                                   )}
-                                  {isMe && (
-                                    <button onClick={() => deleteProjectChatMessage(msg.id)}
-                                      title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--icon-color)', padding: '4px 6px', borderRadius: 5, display: 'flex' }}
-                                      onMouseEnter={e => e.currentTarget.style.color = '#E01E5A'}
-                                      onMouseLeave={e => e.currentTarget.style.color = 'var(--icon-color)'}>
-                                      <Trash2 size={13} />
-                                    </button>
-                                  )}
+                                  <button
+                                    title="More actions"
+                                    onClick={() => setProjectOpenMenuId(prev => prev === msg.id ? null : msg.id)}
+                                    style={actionBtn(projectOpenMenuId === msg.id ? '#E01E5A' : undefined)}
+                                  >
+                                    <MoreHorizontal size={15} />
+                                  </button>
                                 </div>
                               )}
                             </div>
@@ -5511,6 +5755,14 @@ export default function WorkspacePage() {
                     <div style={{ border: '1px solid var(--border-color)', borderRadius: 12, backgroundColor: 'var(--bg-input)', overflow: 'hidden' }}>
                       {/* Formatting toolbar */}
                       <FormattingToolbar textareaEl={projectEditorRef.current} setter={setProjectNewMessage} />
+
+                      {projectReplyingTo && (
+                        <ReplyPreviewBar
+                          sendername={projectReplyingTo.sender?.full_name ?? 'Unknown'}
+                          content={projectReplyingTo.content}
+                          onCancel={() => setProjectReplyingTo(null)}
+                        />
+                      )}
 
                       {/* Attachment preview */}
                       {projectAttachFile && (
@@ -5529,6 +5781,9 @@ export default function WorkspacePage() {
                           </button>
                         </div>
                       )}
+
+                      {/* Mention dropdown */}
+                      <MentionDropdown editorRef={projectEditorRef} type="project" />
 
                       {/* Editor + buttons row */}
                       <div style={{ display: 'flex', alignItems: 'flex-end', padding: '4px 8px 8px' }}>
@@ -5555,8 +5810,65 @@ export default function WorkspacePage() {
                             const isEmpty = !html || html === '<br>'
                             projectNewMessageRef.current = html
                             if (isEmpty !== isProjectEditorEmpty) setIsProjectEditorEmpty(isEmpty)
+
+                            // Mention detection
+                            const sel = window.getSelection();
+                            if (sel && sel.rangeCount > 0) {
+                              const range = sel.getRangeAt(0);
+                              const node = range.startContainer;
+                              if (node.nodeType === Node.TEXT_NODE) {
+                                const text = node.textContent ?? '';
+                                const offset = range.startOffset;
+                                const atIndex = text.lastIndexOf('@', offset);
+                                if (atIndex !== -1 && (atIndex === 0 || /\s/.test(text[atIndex - 1]))) {
+                                  const query = text.slice(atIndex + 1, offset);
+                                  if (!query.includes(' ')) {
+                                    setMentionQuery(query);
+                                    setMentionDropdownFor('project');
+                                    setMentionIndex(0);
+
+                                    const editorEl = projectEditorRef.current;
+                                    if (editorEl) {
+                                      const rect = editorEl.getBoundingClientRect();
+                                      mentionAnchorRef.current = {
+                                        top: rect.top,
+                                        left: rect.left,
+                                        width: rect.width,
+                                      };
+                                    }
+                                    return;
+                                  }
+                                }
+                              }
+                            }
+                            setMentionQuery(null);
+                            setMentionDropdownFor(null);
                           }}
                           onKeyDown={e => {
+                            // Mention dropdown keyboard nav
+                            if (mentionQuery !== null && mentionDropdownFor === 'project' && mentionMembers.length > 0) {
+                              if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setMentionIndex(i => Math.min(i + 1, mentionMembers.length - 1));
+                                return;
+                              }
+                              if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setMentionIndex(i => Math.max(i - 1, 0));
+                                return;
+                              }
+                              if (e.key === 'Enter' || e.key === 'Tab') {
+                                e.preventDefault();
+                                if (projectEditorRef.current) insertMention(mentionMembers[mentionIndex], projectEditorRef.current);
+                                return;
+                              }
+                              if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setMentionQuery(null);
+                                setMentionDropdownFor(null);
+                                return;
+                              }
+                            }
                             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendProjectMessage() }
                           }}
                           style={{ flex: 1, minHeight: 36, maxHeight: 180, overflowY: 'auto', outline: 'none', fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: '1.5', padding: '8px 4px', wordBreak: 'break-word' }}
@@ -5643,7 +5955,7 @@ export default function WorkspacePage() {
                     </div>
 
                     {/* Edit button — owner only */}
-                    {me?.id === workspace.owner_id && (
+                    {isSuperAdmin && (
                       <button
                         onClick={() => { setEditingWorkspace(true); setWsEditName(workspace.name); setWsEditDesc(workspace.description || ""); }}
                         style={{ width: "100%", padding: "10px", borderRadius: 9, border: "1px solid var(--border-color)", backgroundColor: "transparent", color: "var(--text-primary)", fontSize: "0.88rem", fontWeight: 600, cursor: "pointer", transition: "all 0.15s" }}
@@ -6214,9 +6526,10 @@ export default function WorkspacePage() {
                   </span>
                   {(() => {
                     const isOwner = showMemberProfile.user_id === workspace?.owner_id;
-                    const roleLabel = isOwner ? "Owner" : showMemberProfile.role === "admin" ? "Admin" : "Member";
-                    const roleColor = isOwner ? "#f59e0b" : showMemberProfile.role === "admin" ? "#E01E5A" : "var(--text-muted)";
-                    const roleBg = isOwner ? "rgba(245,158,11,0.1)" : showMemberProfile.role === "admin" ? "rgba(224,30,90,0.1)" : "var(--bg-hover)";
+                    const memberWsRole = members.find(m => m.user_id === showMemberProfile.user_id)?.role;
+                    const roleLabel = isOwner ? 'Owner' : memberWsRole === 'admin' ? 'Admin' : 'Member';
+                    const roleColor = isOwner ? '#f59e0b' : memberWsRole === 'admin' ? '#E01E5A' : 'var(--text-muted)';
+                    const roleBg = isOwner ? 'rgba(245,158,11,0.1)' : memberWsRole === 'admin' ? 'rgba(224,30,90,0.1)' : 'var(--bg-hover)';
                     return (
                       <span style={{ marginLeft: 6, fontSize: "0.72rem", fontWeight: 700, color: roleColor, backgroundColor: roleBg, padding: "2px 8px", borderRadius: 999 }}>
                         {roleLabel}
@@ -6340,15 +6653,17 @@ export default function WorkspacePage() {
                         </button>
 
                         {/* Danger zone */}
-                        <div style={{ marginTop: 8, padding: "16px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.2)", backgroundColor: "rgba(248,113,113,0.04)" }}>
-                          <p style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f87171", marginBottom: 10 }}>Deleting this channel will removes all members and messages on it. Cant be restored again.</p>
-                          <button
-                            onClick={() => setShowDeleteChannelConfirm(true)}
-                            style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(248,113,113,0.3)", backgroundColor: "transparent", color: "#f87171", fontSize: "0.84rem", fontWeight: 500, cursor: "pointer", transition: "all 0.15s" }}
-                            onMouseEnter={e => { e.currentTarget.style.backgroundColor = "rgba(248,113,113,0.08)"; }}
-                            onMouseLeave={e => { e.currentTarget.style.backgroundColor = "transparent"; }}
-                          ><Trash2 size={14} /> Delete this channel</button>
-                        </div>
+                        {isAdmin && !isLobby && (
+                          <div style={{ marginTop: 8, padding: "16px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.2)", backgroundColor: "rgba(248,113,113,0.04)" }}>
+                            <p style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f87171", marginBottom: 10 }}>Deleting this channel will removes all members and messages on it. Cant be restored again.</p>
+                            <button
+                              onClick={() => setShowDeleteChannelConfirm(true)}
+                              style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(248,113,113,0.3)", backgroundColor: "transparent", color: "#f87171", fontSize: "0.84rem", fontWeight: 500, cursor: "pointer", transition: "all 0.15s" }}
+                              onMouseEnter={e => { e.currentTarget.style.backgroundColor = "rgba(248,113,113,0.08)"; }}
+                              onMouseLeave={e => { e.currentTarget.style.backgroundColor = "transparent"; }}
+                            ><Trash2 size={14} /> Delete this channel</button>
+                          </div>
+                        )}
                       </>
                     )}
 
@@ -6373,32 +6688,86 @@ export default function WorkspacePage() {
                       In this channel · {channelMembers.length}
                     </p>
 
+                    {isWorkspaceAdmin && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <Shield size={12} />
+                          As an {isSuperAdmin ? 'Owner' : 'Admin'}, you can promote or demote members.
+                        </div>
+                      </div>
+                    )}
+
                     {channelMembers.length === 0 && (
                       <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic", marginBottom: 16 }}>No members yet.</p>
                     )}
 
-                    {channelMembers.map(m => (
-                      <div key={m.user_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border-color)" }}>
-                        <div style={{ position: "relative" }}>
-                          <Avatar profile={m.profile} size={34} />
-                          <div style={{ position: "absolute", bottom: 0, right: 0 }}>
-                            <PresenceDot userId={m.user_id} size={9} />
+                    {channelMembers.map(m => {
+                      const isOwner = m.user_id === workspace?.owner_id;
+                      const memberWsRole = members.find(wm => wm.user_id === m.user_id)?.role;
+                      const roleLabel = isOwner ? 'Owner' : memberWsRole === 'admin' ? 'Admin' : 'Member';
+                      const roleColor = isOwner ? '#f59e0b' : memberWsRole === 'admin' ? '#E01E5A' : 'var(--text-muted)';
+                      const roleBg = isOwner ? 'rgba(245,158,11,0.1)' : memberWsRole === 'admin' ? 'rgba(224,30,90,0.1)' : 'var(--bg-hover)';
+
+                      return (
+                        <div key={m.user_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--border-color)' }}>
+                          <div style={{ position: 'relative' }}>
+                            <Avatar profile={m.profile} size={34} />
+                            <div style={{ position: 'absolute', bottom: 0, right: 0 }}>
+                              <PresenceDot userId={m.user_id} size={9} />
+                            </div>
                           </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                {m.profile?.full_name}
+                              </span>
+                              <span style={{ fontSize: '0.7rem', fontWeight: 700, color: roleColor, backgroundColor: roleBg, padding: '2px 7px', borderRadius: 999 }}>
+                                {roleLabel}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{m.profile?.job_title}</div>
+                          </div>
+                          {/* Role management — only for admins, only on non-owners and not self */}
+                          {isWorkspaceAdmin && !isOwner && m.user_id !== me?.id && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              {memberWsRole !== 'admin' ? (
+                                <button
+                                  onClick={() => updateWorkspaceMemberRole(m.user_id, 'admin')}
+                                  title="Promote to Admin"
+                                  style={{ padding: '4px 10px', borderRadius: 7, border: '1px solid rgba(224,30,90,0.3)', background: 'transparent', color: '#E01E5A', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
+                                  onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'rgba(224,30,90,0.08)')}
+                                  onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+                                >
+                                  Make Admin
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => updateWorkspaceMemberRole(m.user_id, 'member')}
+                                  title="Demote to Member"
+                                  style={{ padding: '4px 10px', borderRadius: 7, border: '1px solid rgba(107,114,128,0.3)', background: 'transparent', color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
+                                  onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
+                                  onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+                                >
+                                  Remove Admin
+                                </button>
+                              )}
+                              {/* Remove from channel — not for Lobby */}
+                              {!isLobby && (
+                                <button
+                                  onClick={() => removeMemberFromChannel(m.user_id)}
+                                  title="Remove from channel"
+                                  style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid rgba(248,113,113,0.3)', background: 'transparent', color: '#f87171', fontSize: '0.78rem', cursor: 'pointer' }}
+                                  onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.08)')}
+                                  onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: "0.88rem", fontWeight: 600, color: "var(--text-primary)" }}>{m.profile?.full_name}</div>
-                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{m.profile?.job_title}</div>
-                        </div>
-                        {!isLobby && m.user_id !== me?.id && (
-                          <button
-                            onClick={() => removeMemberFromChannel(m.user_id)}
-                            style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid rgba(248,113,113,0.3)", backgroundColor: "transparent", color: "#f87171", fontSize: "0.78rem", cursor: "pointer", transition: "all 0.15s" }}
-                            onMouseEnter={e => e.currentTarget.style.backgroundColor = "rgba(248,113,113,0.08)"}
-                            onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
-                          >Remove</button>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
 
                     {/* Add members */}
                     {!isLobby && nonChannelMembers.length > 0 && (
@@ -6733,697 +7102,705 @@ export default function WorkspacePage() {
       )}
 
 
-{/* ── TASK DETAIL SLIDE PANEL ── */}
-{showTaskPanel && activeTask && (
-  <div style={{ position: 'fixed', inset: 0, zIndex: 90, display: 'flex', justifyContent: 'flex-end' }}>
-    <div
-      onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
-      style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)' }}
-    />
-    <div style={{
-      position: 'relative', zIndex: 91, width: 480, maxWidth: '95vw',
-      backgroundColor: 'var(--bg-secondary)', height: '100%',
-      overflowY: 'auto', boxShadow: '-4px 0 32px rgba(0,0,0,0.3)',
-      display: 'flex', flexDirection: 'column',
-    }}>
-      {/* Header */}
-      <div style={{
-        padding: '18px 22px 14px', borderBottom: '1px solid var(--border-color)',
-        display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
-      }}>
-        <TaskTypeIcon type={activeTask.type} size={18} />
-        <span style={{
-          fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 999,
-          backgroundColor: activeTask.type === 'milestone' ? 'rgba(124,58,237,0.12)' : 'rgba(59,130,246,0.12)',
-          color: activeTask.type === 'milestone' ? '#7c3aed' : '#3b82f6',
-        }}>
-          {activeTask.type === 'milestone' ? 'MILESTONE' : 'TASK'}
-        </span>
-        <div style={{ flex: 1 }} />
-        <button
-          onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 20 }}
-        >×</button>
-      </div>
-
-      <div style={{ padding: '20px 22px', flex: 1, display: 'flex', flexDirection: 'column', gap: 18 }}>
-        {/* Title — editable */}
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
-            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Title</div>
-            {!editingTitle && (isProjectAdmin || me?.id === activeTask.assignee_id) && (
-              <button
-                onClick={() => { setEditingTitle(true); setTitleDraft(activeTask.title); }}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex' }}
-                title="Edit title"
-              >
-                <Pencil size={12} color="var(--text-muted)" />
-              </button>
-            )}
-          </div>
-          {editingTitle ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-              <input
-                autoFocus
-                value={titleDraft}
-                onChange={e => setTitleDraft(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') saveTaskTitle();
-                  if (e.key === 'Escape') setEditingTitle(false);
-                }}
-                style={{
-                  width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
-                  backgroundColor: 'var(--bg-tertiary)', border: '1.5px solid #E01E5A',
-                  color: 'var(--text-primary)', fontSize: '1rem', fontWeight: 700, outline: 'none',
-                }}
-              />
-              <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
-                <button
-                  onClick={() => setEditingTitle(false)}
-                  style={{ padding: '5px 13px', borderRadius: 7, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}
-                >Cancel</button>
-                <button
-                  onClick={saveTaskTitle}
-                  disabled={!titleDraft.trim()}
-                  style={{ padding: '5px 13px', borderRadius: 7, border: 'none', backgroundColor: titleDraft.trim() ? '#E01E5A' : 'var(--bg-tertiary)', color: titleDraft.trim() ? '#fff' : 'var(--text-faint)', cursor: titleDraft.trim() ? 'pointer' : 'not-allowed', fontSize: '0.8rem', fontWeight: 700 }}
-                >Save</button>
-              </div>
-            </div>
-          ) : (
-            <div
-              onClick={() => { if (isProjectAdmin || me?.id === activeTask.assignee_id) { setEditingTitle(true); setTitleDraft(activeTask.title); } }}
-              style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.4, cursor: (isProjectAdmin || me?.id === activeTask.assignee_id) ? 'pointer' : 'default' }}
-            >
-              {activeTask.title}
-            </div>
-          )}
-        </div>
-
-        {/* Status + Priority */}
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Status</div>
-            {(isProjectAdmin || me?.id === activeTask.assignee_id) ? (
-              <select
-                value={activeTask.status}
-                onChange={(e) => updateTaskStatus(activeTask.id, e.target.value as TaskStatus)}
-                style={{
-                  width: '100%', padding: '6px 10px', borderRadius: 7,
-                  backgroundColor: STATUS_CONFIG[activeTask.status].bg,
-                  color: STATUS_CONFIG[activeTask.status].color,
-                  border: `1px solid ${STATUS_CONFIG[activeTask.status].color}44`,
-                  fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', outline: 'none',
-                }}
-              >
-                {(Object.entries(STATUS_CONFIG) as [TaskStatus, { label: string; color: string; bg: string }][]).map(([k, v]) => (
-                  <option key={k} value={k}>{v.label}</option>
-                ))}
-              </select>
-            ) : (
-              <span style={{
-                display: 'inline-block', padding: '3px 10px', borderRadius: 999,
-                backgroundColor: STATUS_CONFIG[activeTask.status].bg,
-                color: STATUS_CONFIG[activeTask.status].color,
-                fontSize: '0.78rem', fontWeight: 700,
-              }}>
-                {STATUS_CONFIG[activeTask.status].label}
-              </span>
-            )}
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Priority</div>
-            <span style={{
-              display: 'inline-block', padding: '3px 10px', borderRadius: 999,
-              backgroundColor: 'var(--bg-tertiary)', color: PRIORITY_CONFIG[activeTask.priority].color,
-              fontSize: '0.78rem', fontWeight: 700,
+      {/* ── TASK DETAIL SLIDE PANEL ── */}
+      {showTaskPanel && activeTask && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 90, display: 'flex', justifyContent: 'flex-end' }}>
+          <div
+            onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
+            style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)' }}
+          />
+          <div style={{
+            position: 'relative', zIndex: 91, width: 480, maxWidth: '95vw',
+            backgroundColor: 'var(--bg-secondary)', height: '100%',
+            overflowY: 'auto', boxShadow: '-4px 0 32px rgba(0,0,0,0.3)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            {/* Header */}
+            <div style={{
+              padding: '18px 22px 14px', borderBottom: '1px solid var(--border-color)',
+              display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
             }}>
-              {PRIORITY_CONFIG[activeTask.priority].label}
-            </span>
-          </div>
-        </div>
-
-        {/* Assignee + Due */}
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Assigned To</div>
-            {activeTask.assignee ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <div style={{
-                  width: 26, height: 26, borderRadius: '50%', backgroundColor: '#E01E5A',
-                  color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: '0.72rem', fontWeight: 700, overflow: 'hidden', flexShrink: 0,
-                }}>
-                  {activeTask.assignee.avatar_url
-                    ? <img src={activeTask.assignee.avatar_url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
-                    : activeTask.assignee.full_name?.[0]}
-                </div>
-                <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 500 }}>{activeTask.assignee.full_name}</span>
-              </div>
-            ) : (
-              <span style={{ color: 'var(--text-faint)', fontSize: '0.82rem' }}>Unassigned</span>
-            )}
-          </div>
-          {activeTask.due_date && (
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Due Date</div>
-              <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>
-                {new Date(activeTask.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+              <TaskTypeIcon type={activeTask.type} size={18} />
+              <span style={{
+                fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+                backgroundColor: activeTask.type === 'milestone' ? 'rgba(124,58,237,0.12)' : 'rgba(59,130,246,0.12)',
+                color: activeTask.type === 'milestone' ? '#7c3aed' : '#3b82f6',
+              }}>
+                {activeTask.type === 'milestone' ? 'MILESTONE' : 'TASK'}
               </span>
-            </div>
-          )}
-        </div>
-
-        {/* Description */}
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Description</div>
-            {!editingDescription && (isProjectAdmin || me?.id === activeTask.assignee_id) && (
+              <div style={{ flex: 1 }} />
               <button
-                onClick={() => { setEditingDescription(true); setDescriptionDraft(activeTask.description || ''); }}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex' }}
-                title="Edit description"
-              >
-                <Pencil size={12} color="var(--text-muted)" />
-              </button>
-            )}
-          </div>
-
-          {editingDescription ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <textarea
-                autoFocus
-                placeholder="Add a description…"
-                value={descriptionDraft}
-                onChange={(e) => setDescriptionDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveTaskDescription(); }
-                  if (e.key === 'Escape') { setEditingDescription(false); }
-                }}
-                style={{
-                  width: '100%', padding: '10px 12px', borderRadius: 10, minHeight: 100,
-                  backgroundColor: 'var(--bg-tertiary)', border: '1px solid #E01E5A',
-                  color: 'var(--text-primary)', fontSize: '0.87rem', lineHeight: 1.65,
-                  outline: 'none', resize: 'vertical', fontFamily: 'inherit'
-                }}
-              />
-              <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
-                <button
-                  onClick={() => setEditingDescription(false)}
-                  style={{ padding: '6px 14px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}
-                >Cancel</button>
-                <button
-                  onClick={saveTaskDescription}
-                  style={{ padding: '6px 14px', borderRadius: 8, border: 'none', backgroundColor: '#E01E5A', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700 }}
-                >Save</button>
-              </div>
-            </div>
-          ) : activeTask.description ? (
-            <p
-              onClick={() => { if (isProjectAdmin || me?.id === activeTask.assignee_id) { setEditingDescription(true); setDescriptionDraft(activeTask.description || ''); } }}
-              style={{ margin: 0, fontSize: '0.87rem', color: 'var(--text-secondary)', lineHeight: 1.65, whiteSpace: 'pre-wrap', cursor: (isProjectAdmin || me?.id === activeTask.assignee_id) ? 'pointer' : 'default' }}
-            >
-              {activeTask.description}
-            </p>
-          ) : (isProjectAdmin || me?.id === activeTask.assignee_id) ? (
-            <button
-              onClick={() => { setEditingDescription(true); setDescriptionDraft(''); }}
-              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: '1.5px dashed var(--border-color)', background: 'none', color: 'var(--text-muted)', fontSize: '0.84rem', cursor: 'pointer', fontStyle: 'italic' }}
-            >Click to add a description…</button>
-          ) : null}
-        </div>
-
-        {/* Creation attachment — shown if task was created with a file */}
-        {activeTask.attachment_url && (
-          <div style={{ marginTop: 4 }}>
-            <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
-              Attached File
-            </div>
-            {activeTask.attachment_type === 'image' ? (
-              <a href={activeTask.attachment_url} target="_blank" rel="noopener noreferrer">
-                <img
-                  src={activeTask.attachment_url}
-                  alt={activeTask.attachment_name ?? 'attachment'}
-                  style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 8, objectFit: 'cover', border: '1px solid var(--border-color)' }}
-                />
-              </a>
-            ) : (
-              <a
-                href={activeTask.attachment_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 7,
-                  padding: '7px 12px', borderRadius: 8, fontSize: '0.8rem', fontWeight: 600,
-                  backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
-                  color: 'var(--text-primary)', textDecoration: 'none',
-                }}
-              >
-                <Paperclip size={13} color="var(--text-muted)" />
-                {activeTask.attachment_name ?? 'Download file'}
-                <ExternalLink size={11} color="var(--text-faint)" />
-              </a>
-            )}
-          </div>
-        )}
-
-        {/* ── MILESTONE SECTION ── */}
-        {activeTask.type === 'milestone' && (
-          <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              Milestone Progress
+                onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 20 }}
+              >×</button>
             </div>
 
-            {/* Previous submission */}
-            {activeTask.submission_text && (
-              <div style={{ backgroundColor: 'var(--bg-tertiary)', borderRadius: 9, padding: '11px 13px', border: '1px solid var(--border-color)' }}>
-                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', marginBottom: 5 }}>
-                  Work Submitted
-                  {activeTask.submitted_at && ` • ${new Date(activeTask.submitted_at).toLocaleDateString()}`}
-                  {(activeTask.revision_count ?? 0) > 0 && ` • Revision #${activeTask.revision_count}`}
+            <div style={{ padding: '20px 22px', flex: 1, display: 'flex', flexDirection: 'column', gap: 18 }}>
+              {/* Title — editable */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Title</div>
+                  {!editingTitle && (isProjectAdmin || me?.id === activeTask.assignee_id) && (
+                    <button
+                      onClick={() => { setEditingTitle(true); setTitleDraft(activeTask.title); }}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex' }}
+                      title="Edit title"
+                    >
+                      <Pencil size={12} color="var(--text-muted)" />
+                    </button>
+                  )}
                 </div>
-                <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>
-                  {activeTask.submission_text}
-                </p>
-                {activeTask.submission_url && (
-                  <div style={{ marginTop: 8 }}>
-                    {activeTask.submission_url.match(/\.(jpg|jpeg|png|gif|webp)$/i) || activeTask.submission_url.includes('/image/') ? (
-                      <a href={activeTask.submission_url} target="_blank" rel="noopener noreferrer">
-                        <img
-                          src={activeTask.submission_url}
-                          alt={activeTask.submission_filename ?? 'Submitted image'}
-                          style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 7, objectFit: 'cover', border: '1px solid var(--border-color)' }}
-                        />
-                      </a>
-                    ) : (
-                      <a
-                        href={activeTask.submission_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 6,
-                          padding: '6px 12px', borderRadius: 7,
-                          backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
-                          color: 'var(--text-primary)', textDecoration: 'none',
-                          fontSize: '0.77rem', fontWeight: 600,
-                        }}
-                      >
-                        <Paperclip size={13} />
-                        {activeTask.submission_filename ?? 'View Attachment'}
-                        <ExternalLink size={11} style={{ color: 'var(--text-muted)' }} />
-                      </a>
-                    )}
+                {editingTitle ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                    <input
+                      autoFocus
+                      value={titleDraft}
+                      onChange={e => setTitleDraft(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') saveTaskTitle();
+                        if (e.key === 'Escape') setEditingTitle(false);
+                      }}
+                      style={{
+                        width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
+                        backgroundColor: 'var(--bg-tertiary)', border: '1.5px solid #E01E5A',
+                        color: 'var(--text-primary)', fontSize: '1rem', fontWeight: 700, outline: 'none',
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
+                      <button
+                        onClick={() => setEditingTitle(false)}
+                        style={{ padding: '5px 13px', borderRadius: 7, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}
+                      >Cancel</button>
+                      <button
+                        onClick={saveTaskTitle}
+                        disabled={!titleDraft.trim()}
+                        style={{ padding: '5px 13px', borderRadius: 7, border: 'none', backgroundColor: titleDraft.trim() ? '#E01E5A' : 'var(--bg-tertiary)', color: titleDraft.trim() ? '#fff' : 'var(--text-faint)', cursor: titleDraft.trim() ? 'pointer' : 'not-allowed', fontSize: '0.8rem', fontWeight: 700 }}
+                      >Save</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    onClick={() => { if (isProjectAdmin || me?.id === activeTask.assignee_id) { setEditingTitle(true); setTitleDraft(activeTask.title); } }}
+                    style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.4, cursor: (isProjectAdmin || me?.id === activeTask.assignee_id) ? 'pointer' : 'default' }}
+                  >
+                    {activeTask.title}
                   </div>
                 )}
-
               </div>
-            )}
 
-            {/* Revision note */}
-            {activeTask.revision_note && activeTask.status === 'changes_requested' && (
-              <div style={{ backgroundColor: 'rgba(239,68,68,0.07)', borderRadius: 9, padding: '11px 13px', border: '1px solid rgba(239,68,68,0.2)' }}>
-                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', marginBottom: 5 }}>🔄 Changes Requested</div>
-                <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>{activeTask.revision_note}</p>
+              {/* Status + Priority */}
+              <div style={{ display: 'flex', gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Status</div>
+                  {(isProjectAdmin || me?.id === activeTask.assignee_id) ? (
+                    <select
+                      value={activeTask.status}
+                      onChange={(e) => updateTaskStatus(activeTask.id, e.target.value as TaskStatus)}
+                      style={{
+                        width: '100%', padding: '6px 10px', borderRadius: 7,
+                        backgroundColor: STATUS_CONFIG[activeTask.status].bg,
+                        color: STATUS_CONFIG[activeTask.status].color,
+                        border: `1px solid ${STATUS_CONFIG[activeTask.status].color}44`,
+                        fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', outline: 'none',
+                      }}
+                    >
+                      {(Object.entries(STATUS_CONFIG) as [TaskStatus, { label: string; color: string; bg: string }][]).map(([k, v]) => (
+                        <option key={k} value={k}>{v.label}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span style={{
+                      display: 'inline-block', padding: '3px 10px', borderRadius: 999,
+                      backgroundColor: STATUS_CONFIG[activeTask.status].bg,
+                      color: STATUS_CONFIG[activeTask.status].color,
+                      fontSize: '0.78rem', fontWeight: 700,
+                    }}>
+                      {STATUS_CONFIG[activeTask.status].label}
+                    </span>
+                  )}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Priority</div>
+                  <span style={{
+                    display: 'inline-block', padding: '3px 10px', borderRadius: 999,
+                    backgroundColor: 'var(--bg-tertiary)', color: PRIORITY_CONFIG[activeTask.priority].color,
+                    fontSize: '0.78rem', fontWeight: 700,
+                  }}>
+                    {PRIORITY_CONFIG[activeTask.priority].label}
+                  </span>
+                </div>
               </div>
-            )}
 
-            {/* ASSIGNEE: Submit work — shown for both task and milestone when assignee and status allows */}
-            {me?.id === activeTask.assignee_id
-              && ['open', 'active', 'changes_requested'].includes(activeTask.status)
-              && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {/* Label */}
-                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                  Submit Work
+              {/* Assignee + Due */}
+              <div style={{ display: 'flex', gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Assigned To</div>
+                  {activeTask.assignee ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                      <div style={{
+                        width: 26, height: 26, borderRadius: '50%', backgroundColor: '#E01E5A',
+                        color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '0.72rem', fontWeight: 700, overflow: 'hidden', flexShrink: 0,
+                      }}>
+                        {activeTask.assignee.avatar_url
+                          ? <img src={activeTask.assignee.avatar_url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                          : activeTask.assignee.full_name?.[0]}
+                      </div>
+                      <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)', fontWeight: 500 }}>{activeTask.assignee.full_name}</span>
+                    </div>
+                  ) : (
+                    <span style={{ color: 'var(--text-faint)', fontSize: '0.82rem' }}>Unassigned</span>
+                  )}
+                </div>
+                {activeTask.due_date && (
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }}>Due Date</div>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                      {new Date(activeTask.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Description */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Description</div>
+                  {!editingDescription && (isProjectAdmin || me?.id === activeTask.assignee_id) && (
+                    <button
+                      onClick={() => { setEditingDescription(true); setDescriptionDraft(activeTask.description || ''); }}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex' }}
+                      title="Edit description"
+                    >
+                      <Pencil size={12} color="var(--text-muted)" />
+                    </button>
+                  )}
                 </div>
 
-                {/* Text area */}
-                <textarea
-                  placeholder={activeTask.type === 'milestone' ? 'Describe completed work...' : 'Add a note (optional)...'}
-                  value={submitText}
-                  onChange={e => setSubmitText(e.target.value)}
-                  rows={3}
+                {editingDescription ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <textarea
+                      autoFocus
+                      placeholder="Add a description…"
+                      value={descriptionDraft}
+                      onChange={(e) => setDescriptionDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveTaskDescription(); }
+                        if (e.key === 'Escape') { setEditingDescription(false); }
+                      }}
+                      style={{
+                        width: '100%', padding: '10px 12px', borderRadius: 10, minHeight: 100,
+                        backgroundColor: 'var(--bg-tertiary)', border: '1px solid #E01E5A',
+                        color: 'var(--text-primary)', fontSize: '0.87rem', lineHeight: 1.65,
+                        outline: 'none', resize: 'vertical', fontFamily: 'inherit'
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
+                      <button
+                        onClick={() => setEditingDescription(false)}
+                        style={{ padding: '6px 14px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 600 }}
+                      >Cancel</button>
+                      <button
+                        onClick={saveTaskDescription}
+                        style={{ padding: '6px 14px', borderRadius: 8, border: 'none', backgroundColor: '#E01E5A', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700 }}
+                      >Save</button>
+                    </div>
+                  </div>
+                ) : activeTask.description ? (
+                  <p
+                    onClick={() => { if (isProjectAdmin || me?.id === activeTask.assignee_id) { setEditingDescription(true); setDescriptionDraft(activeTask.description || ''); } }}
+                    style={{ margin: 0, fontSize: '0.87rem', color: 'var(--text-secondary)', lineHeight: 1.65, whiteSpace: 'pre-wrap', cursor: (isProjectAdmin || me?.id === activeTask.assignee_id) ? 'pointer' : 'default' }}
+                  >
+                    {activeTask.description}
+                  </p>
+                ) : (isProjectAdmin || me?.id === activeTask.assignee_id) ? (
+                  <button
+                    onClick={() => { setEditingDescription(true); setDescriptionDraft(''); }}
+                    style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: '1.5px dashed var(--border-color)', background: 'none', color: 'var(--text-muted)', fontSize: '0.84rem', cursor: 'pointer', fontStyle: 'italic' }}
+                  >Click to add a description…</button>
+                ) : null}
+              </div>
+
+              {/* Creation attachment — shown if task was created with a file */}
+              {activeTask.attachment_url && (
+                <div style={{ marginTop: 4 }}>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+                    Attached File
+                  </div>
+                  {activeTask.attachment_type === 'image' ? (
+                    <a href={activeTask.attachment_url} target="_blank" rel="noopener noreferrer">
+                      <img
+                        src={activeTask.attachment_url}
+                        alt={activeTask.attachment_name ?? 'attachment'}
+                        style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 8, objectFit: 'cover', border: '1px solid var(--border-color)' }}
+                      />
+                    </a>
+                  ) : (
+                    <a
+                      href={activeTask.attachment_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 7,
+                        padding: '7px 12px', borderRadius: 8, fontSize: '0.8rem', fontWeight: 600,
+                        backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
+                        color: 'var(--text-primary)', textDecoration: 'none',
+                      }}
+                    >
+                      <Paperclip size={13} color="var(--text-muted)" />
+                      {activeTask.attachment_name ?? 'Download file'}
+                      <ExternalLink size={11} color="var(--text-faint)" />
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* ── SUBMIT / REVIEW SECTION (milestones + assigned tasks) ── */}
+              {(activeTask.type === 'milestone' || (activeTask.type === 'task' && activeTask.assignee_id)) && (
+                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    {activeTask.type === 'milestone' ? 'Milestone Progress' : 'Task Progress'}
+                  </div>
+
+                  {/* Previous submission */}
+                  {activeTask.submission_text && (
+                    <div style={{ backgroundColor: 'var(--bg-tertiary)', borderRadius: 9, padding: '11px 13px', border: '1px solid var(--border-color)' }}>
+                      <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', marginBottom: 5 }}>
+                        Work Submitted
+                        {activeTask.submitted_at && ` • ${new Date(activeTask.submitted_at).toLocaleDateString()}`}
+                        {(activeTask.revision_count ?? 0) > 0 && ` • Revision #${activeTask.revision_count}`}
+                      </div>
+                      <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>
+                        {activeTask.submission_text}
+                      </p>
+                      {activeTask.submission_url && (
+                        <div style={{ marginTop: 8 }}>
+                          {activeTask.submission_url.match(/\.(jpg|jpeg|png|gif|webp)$/i) || activeTask.submission_url.includes('/image/') ? (
+                            <a href={activeTask.submission_url} target="_blank" rel="noopener noreferrer">
+                              <img
+                                src={activeTask.submission_url}
+                                alt={activeTask.submission_filename ?? 'Submitted image'}
+                                style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 7, objectFit: 'cover', border: '1px solid var(--border-color)' }}
+                              />
+                            </a>
+                          ) : (
+                            <a
+                              href={activeTask.submission_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 6,
+                                padding: '6px 12px', borderRadius: 7,
+                                backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
+                                color: 'var(--text-primary)', textDecoration: 'none',
+                                fontSize: '0.77rem', fontWeight: 600,
+                              }}
+                            >
+                              <Paperclip size={13} />
+                              {activeTask.submission_filename ?? 'View Attachment'}
+                              <ExternalLink size={11} style={{ color: 'var(--text-muted)' }} />
+                            </a>
+                          )}
+                        </div>
+                      )}
+
+                    </div>
+                  )}
+
+                  {/* Revision note */}
+                  {activeTask.revision_note && activeTask.status === 'changes_requested' && (
+                    <div style={{ backgroundColor: 'rgba(239,68,68,0.07)', borderRadius: 9, padding: '11px 13px', border: '1px solid rgba(239,68,68,0.2)' }}>
+                      <div style={{ fontSize: '0.68rem', fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', marginBottom: 5 }}>🔄 Changes Requested</div>
+                      <p style={{ margin: 0, fontSize: '0.84rem', color: 'var(--text-primary)', whiteSpace: 'pre-wrap' }}>{activeTask.revision_note}</p>
+                    </div>
+                  )}
+
+                  {/* ASSIGNEE: Submit work */}
+                  {me?.id === activeTask.assignee_id
+                    && ['active', 'changes_requested'].includes(activeTask.status)
+                    && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {/* Label */}
+                        <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                          Submit Work
+                        </div>
+
+                        {/* Text area */}
+                        <textarea
+                          placeholder={activeTask.type === 'milestone' ? 'Describe completed work...' : 'Add a note (optional)...'}
+                          value={submitText}
+                          onChange={e => setSubmitText(e.target.value)}
+                          rows={3}
+                          style={{
+                            width: '100%', padding: '9px 11px', borderRadius: 8, boxSizing: 'border-box',
+                            backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                            color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
+                          }}
+                        />
+
+                        {/* File attachment area */}
+                        <div
+                          onClick={() => submitFileInputRef.current?.click()}
+                          style={{
+                            border: `1.5px dashed ${submitFile ? '#E01E5A' : 'var(--border-color)'}`, borderRadius: 8,
+                            padding: submitFile ? '8px 12px' : '9px 12px',
+                            display: 'flex', alignItems: 'center', gap: 9,
+                            cursor: 'pointer', backgroundColor: 'var(--bg-tertiary)',
+                            transition: 'border-color 0.15s',
+                          }}
+                          onMouseEnter={e => !submitFile && (e.currentTarget.style.borderColor = '#E01E5A')}
+                          onMouseLeave={e => !submitFile && (e.currentTarget.style.borderColor = 'var(--border-color)')}
+                        >
+                          {submitFile ? (
+                            <>
+                              {submitPreview ? (
+                                <img
+                                  src={submitPreview}
+                                  alt="preview"
+                                  style={{ width: 34, height: 34, objectFit: 'cover', borderRadius: 5, flexShrink: 0 }}
+                                />
+                              ) : (
+                                <div style={{
+                                  width: 34, height: 34, borderRadius: 5, flexShrink: 0,
+                                  backgroundColor: 'var(--bg-secondary)',
+                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                }}>
+                                  <Paperclip size={15} style={{ color: 'var(--text-muted)' }} />
+                                </div>
+                              )}
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {submitFile.name}
+                                </div>
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                  {(submitFile.size / 1024 / 1024).toFixed(2)} MB
+                                </div>
+                              </div>
+                              <button
+                                onClick={e => { e.stopPropagation(); setSubmitFile(null); setSubmitBytes(null); setSubmitPreview(null); }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
+                              >
+                                <X size={14} />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <Paperclip size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                              <span style={{ fontSize: '0.77rem', color: 'var(--text-muted)' }}>
+                                Attach a file <span style={{ color: 'var(--text-faint)', fontSize: '0.71rem' }}>(optional · max 7.5 MB)</span>
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        <input
+                          ref={submitFileInputRef}
+                          type="file"
+                          style={{ display: 'none' }}
+                          onChange={async e => {
+                            const f = e.target.files?.[0];
+                            if (!f) return;
+                            if (f.size > 7.5 * 1024 * 1024) { showToast('File exceeds 7.5 MB limit.', 'error'); return; }
+                            const bytes = await f.arrayBuffer();
+                            setSubmitFile(f);
+                            setSubmitBytes(bytes);
+                            setSubmitPreview(f.type.startsWith('image/') ? URL.createObjectURL(f) : null);
+                            e.target.value = '';
+                          }}
+                        />
+
+                        {/* Submit button */}
+                        <button
+                          onClick={submitMilestoneWork}
+                          disabled={submittingTask || (!submitText.trim() && !submitFile)}
+                          style={{
+                            padding: '8px 18px', borderRadius: 8, fontWeight: 700, fontSize: '0.82rem', border: 'none',
+                            alignSelf: 'flex-end',
+                            backgroundColor: (submitText.trim() || submitFile) ? '#E01E5A' : 'var(--bg-tertiary)',
+                            color: (submitText.trim() || submitFile) ? '#fff' : 'var(--text-faint)',
+                            cursor: (submitText.trim() || submitFile) && !submittingTask ? 'pointer' : 'not-allowed',
+                            opacity: submittingTask ? 0.7 : 1,
+                          }}
+                        >
+                          {submittingTask ? 'Submitting...' : 'Submit Work'}
+                        </button>
+                      </div>
+                    )}
+
+
+
+                  {/* ADMIN: In Review actions */}
+                  {isAdmin && activeTask.status === 'in_review' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {showRevisionInput ? (
+                        <>
+                          <textarea
+                            autoFocus
+                            placeholder="Describe what needs to be changed…"
+                            value={revisionNote}
+                            onChange={(e) => setRevisionNote(e.target.value)}
+                            rows={3}
+                            style={{
+                              width: '100%', padding: '9px 11px', borderRadius: 8, boxSizing: 'border-box',
+                              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                              color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
+                            }}
+                          />
+                          <div style={{ display: 'flex', gap: 7 }}>
+                            <button onClick={() => { setShowRevisionInput(false); setRevisionNote('') }}
+                              style={{ flex: 1, padding: '7px', borderRadius: 7, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
+                              Cancel
+                            </button>
+                            <button onClick={requestTaskRevision} disabled={submittingTask || !revisionNote.trim()}
+                              style={{ flex: 2, padding: '7px', borderRadius: 7, backgroundColor: '#ef4444', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem' }}>
+                              {submittingTask ? 'Sending…' : '🔄 Request Changes'}
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{ display: 'flex', gap: 7 }}>
+                          <button onClick={() => setShowRevisionInput(true)}
+                            style={{ flex: 1, padding: '8px', borderRadius: 8, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
+                            🔄 Request Changes
+                          </button>
+                          <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
+                            style={{ flex: 1, padding: '8px', borderRadius: 8, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem' }}>
+                            ✅ Approve & Complete
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ADMIN: Mark complete on open/active milestone (no assignee path) */}
+                  {isAdmin && !activeTask.assignee_id && ['open', 'active'].includes(activeTask.status) && (
+                    <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
+                      style={{ padding: '8px', borderRadius: 8, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem' }}>
+                      ✅ Mark Complete
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* TASK: direct complete — only for unassigned tasks (admins only) */}
+              {activeTask.type === 'task' && !activeTask.assignee_id && activeTask.status !== 'complete' && isAdmin && (
+                <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
+                  style={{ padding: '10px', borderRadius: 9, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.86rem', marginTop: 'auto' }}>
+                  ✅ Mark as Complete
+                </button>
+              )}
+
+              {/* Delete (admin only) */}
+              {isAdmin && (
+                <button onClick={() => deleteProjectTask(activeTask.id)}
+                  style={{ padding: '7px', borderRadius: 8, backgroundColor: 'transparent', border: '1px solid rgba(239,68,68,0.3)', color: '#ef4444', cursor: 'pointer', fontSize: '0.77rem', fontWeight: 600 }}>
+                  Delete {activeTask.type === 'milestone' ? 'Milestone' : 'Task'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── CREATE TASK / MILESTONE MODAL ── */}
+      {showCreateTask && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div onClick={() => setShowCreateTask(false)} style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.55)' }} />
+          <div style={{
+            position: 'relative', zIndex: 101, width: 500, maxWidth: '95vw',
+            backgroundColor: 'var(--bg-secondary)', borderRadius: 16,
+            padding: '26px 26px 22px', boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 22 }}>
+              <TaskTypeIcon type={newTaskType} size={18} />
+              <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                Create {newTaskType === 'milestone' ? 'Milestone' : 'Task'}
+              </h3>
+              <div style={{ flex: 1 }} />
+              <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+                {(['task', 'milestone'] as const).map((t) => (
+                  <button key={t} onClick={() => setNewTaskType(t)}
+                    style={{
+                      padding: '5px 13px', fontSize: '0.73rem', fontWeight: 700, border: 'none', cursor: 'pointer',
+                      backgroundColor: newTaskType === t ? '#E01E5A' : 'transparent',
+                      color: newTaskType === t ? '#fff' : 'var(--text-muted)',
+                    }}>
+                    {t === 'milestone' ? 'Milestone' : 'Task'}
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => setShowCreateTask(false)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 18, padding: '0 0 0 8px' }}>×</button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+              {/* Title */}
+              <div>
+                <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Title *</label>
+                <input
+                  autoFocus
+                  value={newTaskTitle}
+                  onChange={(e) => setNewTaskTitle(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') createProjectTask() }}
+                  placeholder={newTaskType === 'milestone' ? 'e.g. Complete API Integration' : 'e.g. Review design mockups'}
                   style={{
-                    width: '100%', padding: '9px 11px', borderRadius: 8, boxSizing: 'border-box',
+                    width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
+                    backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                    color: 'var(--text-primary)', fontSize: '0.88rem', outline: 'none',
+                  }}
+                />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Description</label>
+                <textarea
+                  value={newTaskDesc}
+                  onChange={(e) => setNewTaskDesc(e.target.value)}
+                  rows={3}
+                  placeholder="Optional details…"
+                  style={{
+                    width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
                     backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
                     color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
                   }}
                 />
+              </div>
 
-                {/* File attachment area */}
-                <div
-                  onClick={() => submitFileInputRef.current?.click()}
+              {/* Assignee + Priority */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
+                <div>
+                  <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Assign To</label>
+                  <select
+                    value={newTaskAssigneeId}
+                    onChange={(e) => setNewTaskAssigneeId(e.target.value)}
+                    style={{
+                      width: '100%', padding: '7px 10px', borderRadius: 8, boxSizing: 'border-box',
+                      backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                      color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
+                    }}
+                  >
+                    <option value="" disabled>Select a member...</option>
+                    {projectMembers.map((m: any) => (
+                      <option key={m.user_id} value={m.user_id}>
+                        {m.profile?.full_name ?? m.user_id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Priority</label>
+                  <select
+                    value={newTaskPriority}
+                    onChange={(e) => setNewTaskPriority(e.target.value as TaskPriority)}
+                    style={{
+                      width: '100%', padding: '7px 10px', borderRadius: 8, boxSizing: 'border-box',
+                      backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                      color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
+                    }}
+                  >
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="urgent">Urgent</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Due date */}
+              <div>
+                <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Due Date (optional)</label>
+                <input
+                  type="date"
+                  value={newTaskDueDate}
+                  onChange={(e) => setNewTaskDueDate(e.target.value)}
                   style={{
-                    border: `1.5px dashed ${submitFile ? '#E01E5A' : 'var(--border-color)'}`, borderRadius: 8,
-                    padding: submitFile ? '8px 12px' : '9px 12px',
-                    display: 'flex', alignItems: 'center', gap: 9,
-                    cursor: 'pointer', backgroundColor: 'var(--bg-tertiary)',
-                    transition: 'border-color 0.15s',
+                    width: '100%', padding: '7px 11px', borderRadius: 8, boxSizing: 'border-box',
+                    backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
+                    color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
                   }}
-                  onMouseEnter={e => !submitFile && (e.currentTarget.style.borderColor = '#E01E5A')}
-                  onMouseLeave={e => !submitFile && (e.currentTarget.style.borderColor = 'var(--border-color)')}
-                >
-                  {submitFile ? (
-                    <>
-                      {submitPreview ? (
-                        <img
-                          src={submitPreview}
-                          alt="preview"
-                          style={{ width: 34, height: 34, objectFit: 'cover', borderRadius: 5, flexShrink: 0 }}
-                        />
-                      ) : (
-                        <div style={{
-                          width: 34, height: 34, borderRadius: 5, flexShrink: 0,
-                          backgroundColor: 'var(--bg-secondary)',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        }}>
-                          <Paperclip size={15} style={{ color: 'var(--text-muted)' }} />
-                        </div>
-                      )}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {submitFile.name}
-                        </div>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                          {(submitFile.size / 1024 / 1024).toFixed(2)} MB
-                        </div>
-                      </div>
-                      <button
-                        onClick={e => { e.stopPropagation(); setSubmitFile(null); setSubmitBytes(null); setSubmitPreview(null); }}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}
-                      >
-                        <X size={14} />
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <Paperclip size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                      <span style={{ fontSize: '0.77rem', color: 'var(--text-muted)' }}>
-                        Attach a file <span style={{ color: 'var(--text-faint)', fontSize: '0.71rem' }}>(optional · max 7.5 MB)</span>
+                />
+              </div>
+              {/* Attachment */}
+              <div>
+                <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>
+                  Attach File <span style={{ fontWeight: 400, color: 'var(--text-faint)' }}>(optional, max 7.5MB)</span>
+                </label>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    onClick={() => newTaskFileInputRef.current?.click()}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '7px 13px', borderRadius: 8, fontSize: '0.78rem', fontWeight: 600,
+                      cursor: 'pointer', backgroundColor: 'var(--bg-tertiary)',
+                      border: '1px solid var(--border-color)', color: 'var(--text-muted)',
+                    }}
+                  >
+                    <Paperclip size={13} />
+                    {newTaskFile ? 'Change File' : 'Attach File'}
+                  </button>
+                  {newTaskFile && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                        {newTaskFile.name}
                       </span>
-                    </>
+                      <button
+                        type="button"
+                        onClick={() => { setNewTaskFile(null); setNewTaskBytes(null); }}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0, display: 'flex' }}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
                   )}
                 </div>
                 <input
-                  ref={submitFileInputRef}
+                  ref={newTaskFileInputRef}
                   type="file"
                   style={{ display: 'none' }}
                   onChange={async e => {
                     const f = e.target.files?.[0];
                     if (!f) return;
-                    if (f.size > 7.5 * 1024 * 1024) { showToast('File exceeds 7.5 MB limit.', 'error'); return; }
+                    if (f.size > 7.5 * 1024 * 1024) { showToast('File exceeds 7.5MB limit', 'error'); return; }
                     const bytes = await f.arrayBuffer();
-                    setSubmitFile(f);
-                    setSubmitBytes(bytes);
-                    setSubmitPreview(f.type.startsWith('image/') ? URL.createObjectURL(f) : null);
-                    e.target.value = '';
+                    setNewTaskFile(f);
+                    setNewTaskBytes(bytes);
                   }}
                 />
-
-                {/* Submit button */}
+              </div>
+              {/* Buttons */}
+              <div style={{ display: 'flex', gap: 9, marginTop: 4 }}>
+                <button onClick={() => setShowCreateTask(false)}
+                  style={{ flex: 1, padding: '9px', borderRadius: 9, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.86rem' }}>
+                  Cancel
+                </button>
                 <button
-                  onClick={submitMilestoneWork}
-                  disabled={submittingTask || (!submitText.trim() && !submitFile)}
+                  onClick={createProjectTask}
+                  disabled={creatingTask || !newTaskTitle.trim()}
                   style={{
-                    padding: '8px 18px', borderRadius: 8, fontWeight: 700, fontSize: '0.82rem', border: 'none',
-                    alignSelf: 'flex-end',
-                    backgroundColor: (submitText.trim() || submitFile) ? '#E01E5A' : 'var(--bg-tertiary)',
-                    color: (submitText.trim() || submitFile) ? '#fff' : 'var(--text-faint)',
-                    cursor: (submitText.trim() || submitFile) && !submittingTask ? 'pointer' : 'not-allowed',
-                    opacity: submittingTask ? 0.7 : 1,
+                    flex: 2, padding: '9px', borderRadius: 9, fontWeight: 700, fontSize: '0.86rem', border: 'none',
+                    backgroundColor: newTaskTitle.trim() ? '#E01E5A' : 'var(--bg-tertiary)',
+                    color: newTaskTitle.trim() ? '#fff' : 'var(--text-faint)',
+                    cursor: newTaskTitle.trim() ? 'pointer' : 'not-allowed',
                   }}
                 >
-                  {submittingTask ? 'Submitting...' : 'Submit Work'}
+                  {creatingTask ? 'Creating…' : `Create ${newTaskType === 'milestone' ? 'Milestone' : 'Task'}`}
                 </button>
               </div>
-            )}
-
-
-
-            {/* ADMIN: In Review actions */}
-            {isProjectAdmin && activeTask.status === 'in_review' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {showRevisionInput ? (
-                  <>
-                    <textarea
-                      autoFocus
-                      placeholder="Describe what needs to be changed…"
-                      value={revisionNote}
-                      onChange={(e) => setRevisionNote(e.target.value)}
-                      rows={3}
-                      style={{
-                        width: '100%', padding: '9px 11px', borderRadius: 8, boxSizing: 'border-box',
-                        backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
-                        color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
-                      }}
-                    />
-                    <div style={{ display: 'flex', gap: 7 }}>
-                      <button onClick={() => { setShowRevisionInput(false); setRevisionNote('') }}
-                        style={{ flex: 1, padding: '7px', borderRadius: 7, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
-                        Cancel
-                      </button>
-                      <button onClick={requestTaskRevision} disabled={submittingTask || !revisionNote.trim()}
-                        style={{ flex: 2, padding: '7px', borderRadius: 7, backgroundColor: '#ef4444', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem' }}>
-                        {submittingTask ? 'Sending…' : '🔄 Request Changes'}
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <div style={{ display: 'flex', gap: 7 }}>
-                    <button onClick={() => setShowRevisionInput(true)}
-                      style={{ flex: 1, padding: '8px', borderRadius: 8, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem' }}>
-                      🔄 Request Changes
-                    </button>
-                    <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
-                      style={{ flex: 1, padding: '8px', borderRadius: 8, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem' }}>
-                      ✅ Approve & Complete
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ADMIN: Mark complete on open/active milestone */}
-            {isProjectAdmin && ['open', 'active'].includes(activeTask.status) && (
-              <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
-                style={{ padding: '8px', borderRadius: 8, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem' }}>
-                ✅ Mark Complete
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* TASK: simple complete button */}
-        {activeTask.type === 'task' && activeTask.status !== 'complete' && (
-          <button onClick={() => updateTaskStatus(activeTask.id, 'complete')}
-            style={{ padding: '10px', borderRadius: 9, backgroundColor: '#22c55e', border: 'none', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: '0.86rem', marginTop: 'auto' }}>
-            ✅ Mark as Complete
-          </button>
-        )}
-
-        {/* Delete (admin only) */}
-        {isProjectAdmin && (
-          <button onClick={() => deleteProjectTask(activeTask.id)}
-            style={{ padding: '7px', borderRadius: 8, backgroundColor: 'transparent', border: '1px solid rgba(239,68,68,0.3)', color: '#ef4444', cursor: 'pointer', fontSize: '0.77rem', fontWeight: 600 }}>
-            Delete {activeTask.type === 'milestone' ? 'Milestone' : 'Task'}
-          </button>
-        )}
-      </div>
-    </div>
-  </div>
-)}
-
-{/* ── CREATE TASK / MILESTONE MODAL ── */}
-{showCreateTask && (
-  <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-    <div onClick={() => setShowCreateTask(false)} style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.55)' }} />
-    <div style={{
-      position: 'relative', zIndex: 101, width: 500, maxWidth: '95vw',
-      backgroundColor: 'var(--bg-secondary)', borderRadius: 16,
-      padding: '26px 26px 22px', boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 22 }}>
-        <TaskTypeIcon type={newTaskType} size={18} />
-        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-          Create {newTaskType === 'milestone' ? 'Milestone' : 'Task'}
-        </h3>
-        <div style={{ flex: 1 }} />
-        <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border-color)' }}>
-          {(['task', 'milestone'] as const).map((t) => (
-            <button key={t} onClick={() => setNewTaskType(t)}
-              style={{
-                padding: '5px 13px', fontSize: '0.73rem', fontWeight: 700, border: 'none', cursor: 'pointer',
-                backgroundColor: newTaskType === t ? '#E01E5A' : 'transparent',
-                color: newTaskType === t ? '#fff' : 'var(--text-muted)',
-              }}>
-              {t === 'milestone' ? 'Milestone' : 'Task'}
-            </button>
-          ))}
-        </div>
-        <button onClick={() => setShowCreateTask(false)}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 18, padding: '0 0 0 8px' }}>×</button>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
-        {/* Title */}
-        <div>
-          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Title *</label>
-          <input
-            autoFocus
-            value={newTaskTitle}
-            onChange={(e) => setNewTaskTitle(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') createProjectTask() }}
-            placeholder={newTaskType === 'milestone' ? 'e.g. Complete API Integration' : 'e.g. Review design mockups'}
-            style={{
-              width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
-              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
-              color: 'var(--text-primary)', fontSize: '0.88rem', outline: 'none',
-            }}
-          />
-        </div>
-
-        {/* Description */}
-        <div>
-          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Description</label>
-          <textarea
-            value={newTaskDesc}
-            onChange={(e) => setNewTaskDesc(e.target.value)}
-            rows={3}
-            placeholder="Optional details…"
-            style={{
-              width: '100%', padding: '8px 11px', borderRadius: 8, boxSizing: 'border-box',
-              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
-              color: 'var(--text-primary)', fontSize: '0.84rem', resize: 'vertical', outline: 'none',
-            }}
-          />
-        </div>
-
-        {/* Assignee + Priority */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 11 }}>
-          <div>
-            <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Assign To</label>
-            <select
-              value={newTaskAssigneeId}
-              onChange={(e) => setNewTaskAssigneeId(e.target.value)}
-              style={{
-                width: '100%', padding: '7px 10px', borderRadius: 8, boxSizing: 'border-box',
-                backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
-                color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
-              }}
-            >
-              <option value="">Unassigned</option>
-              {projectMembers.map((m: any) => (
-                <option key={m.user_id} value={m.user_id}>
-                  {m.profile?.full_name ?? m.user_id}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Priority</label>
-            <select
-              value={newTaskPriority}
-              onChange={(e) => setNewTaskPriority(e.target.value as TaskPriority)}
-              style={{
-                width: '100%', padding: '7px 10px', borderRadius: 8, boxSizing: 'border-box',
-                backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
-                color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
-              }}
-            >
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="urgent">Urgent</option>
-            </select>
+            </div>
           </div>
         </div>
-
-        {/* Due date */}
-        <div>
-          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Due Date (optional)</label>
-          <input
-            type="date"
-            value={newTaskDueDate}
-            onChange={(e) => setNewTaskDueDate(e.target.value)}
-            style={{
-              width: '100%', padding: '7px 11px', borderRadius: 8, boxSizing: 'border-box',
-              backgroundColor: 'var(--bg-input)', border: '1px solid var(--border-color)',
-              color: 'var(--text-primary)', fontSize: '0.84rem', outline: 'none',
-            }}
-          />
-        </div>
-        {/* Attachment */}
-        <div>
-          <label style={{ fontSize: '0.73rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>
-            Attach File <span style={{ fontWeight: 400, color: 'var(--text-faint)' }}>(optional, max 7.5MB)</span>
-          </label>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button
-              type="button"
-              onClick={() => newTaskFileInputRef.current?.click()}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '7px 13px', borderRadius: 8, fontSize: '0.78rem', fontWeight: 600,
-                cursor: 'pointer', backgroundColor: 'var(--bg-tertiary)',
-                border: '1px solid var(--border-color)', color: 'var(--text-muted)',
-              }}
-            >
-              <Paperclip size={13} />
-              {newTaskFile ? 'Change File' : 'Attach File'}
-            </button>
-            {newTaskFile && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                  {newTaskFile.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => { setNewTaskFile(null); setNewTaskBytes(null); }}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', flexShrink: 0, display: 'flex' }}
-                >
-                  <X size={13} />
-                </button>
-              </div>
-            )}
-          </div>
-          <input
-            ref={newTaskFileInputRef}
-            type="file"
-            style={{ display: 'none' }}
-            onChange={async e => {
-              const f = e.target.files?.[0];
-              if (!f) return;
-              if (f.size > 7.5 * 1024 * 1024) { showToast('File exceeds 7.5MB limit', 'error'); return; }
-              const bytes = await f.arrayBuffer();
-              setNewTaskFile(f);
-              setNewTaskBytes(bytes);
-            }}
-          />
-        </div>
-        {/* Buttons */}
-        <div style={{ display: 'flex', gap: 9, marginTop: 4 }}>
-          <button onClick={() => setShowCreateTask(false)}
-            style={{ flex: 1, padding: '9px', borderRadius: 9, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, fontSize: '0.86rem' }}>
-            Cancel
-          </button>
-          <button
-            onClick={createProjectTask}
-            disabled={creatingTask || !newTaskTitle.trim()}
-            style={{
-              flex: 2, padding: '9px', borderRadius: 9, fontWeight: 700, fontSize: '0.86rem', border: 'none',
-              backgroundColor: newTaskTitle.trim() ? '#E01E5A' : 'var(--bg-tertiary)',
-              color: newTaskTitle.trim() ? '#fff' : 'var(--text-faint)',
-              cursor: newTaskTitle.trim() ? 'pointer' : 'not-allowed',
-            }}
-          >
-            {creatingTask ? 'Creating…' : `Create ${newTaskType === 'milestone' ? 'Milestone' : 'Task'}`}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-)}
+      )}
 
       <ToastNotification />
     </div> /* end root column wrapper */
   ); /* end return */
 } /* end WorkspacePage */
+
+export default function Page() {
+  return (
+    <Suspense fallback={null}>
+      <WorkspacePage />
+    </Suspense>
+  );
+}
