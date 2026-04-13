@@ -278,28 +278,28 @@ export default function OnboardingPage() {
 
   // ─────────────────────────────────────────────
   if (checking) return (
-    <div style={{ minHeight: "100vh", backgroundColor: "#0f1114", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <Loader2 size={28} color="#E01E5A" className="animate-spin" />
+    <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Loader2 size={28} color="var(--accent)" className="animate-spin" />
     </div>
   );
 
   if (loading) return (
-    <div style={{ minHeight: "100vh", backgroundColor: "#0f1114", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <Loader2 size={28} color="#E01E5A" className="animate-spin" />
+    <div style={{ minHeight: "100vh", backgroundColor: "var(--bg-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Loader2 size={28} color="var(--accent)" className="animate-spin" />
     </div>
   );
 
   return (
     <div style={{
-      minHeight: "100vh", backgroundColor: "#0f1114", color: "#fff",
+      minHeight: "100vh", backgroundColor: "var(--bg-primary)", color: "var(--text-primary)",
       display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
       padding: "24px", fontFamily: "var(--font-geist-sans), -apple-system, sans-serif",
     }}>
 
       {/* Logo */}
       <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "40px" }}>
-        <div style={{ width: 32, height: 32, borderRadius: 9, backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <MessageSquare size={16} color="#fff" />
+        <div style={{ width: 32, height: 32, borderRadius: 9, backgroundColor: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <MessageSquare size={16} color="var(--accent-foreground)" />
         </div>
         <span style={{ fontWeight: 700, fontSize: "1.1rem" }}>TrexaFlow</span>
       </div>
@@ -315,18 +315,18 @@ export default function OnboardingPage() {
                 <div style={{
                   width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
                   fontSize: "0.75rem", fontWeight: 700,
-                  backgroundColor: isDone ? "#4ade80" : isActive ? "#E01E5A" : "rgba(255,255,255,0.08)",
-                  color: isDone || isActive ? "#fff" : "rgba(255,255,255,0.3)",
+                  backgroundColor: isDone ? "var(--success)" : isActive ? "var(--accent)" : "var(--bg-hover)",
+                  color: isDone || isActive ? "var(--accent-foreground)" : "var(--text-muted)",
                   transition: "all 0.2s",
                 }}>
                   {isDone ? "✓" : i + 1}
                 </div>
-                <span style={{ fontSize: "0.83rem", fontWeight: 500, color: isActive ? "#fff" : "rgba(255,255,255,0.35)" }}>
+                <span style={{ fontSize: "0.83rem", fontWeight: 500, color: isActive ? "var(--text-primary)" : "var(--text-secondary)" }}>
                   {label}
                 </span>
               </div>
               {i === 0 && (
-                <div style={{ width: 32, height: 1, backgroundColor: step === "workspace" ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.08)", margin: "0 4px" }} />
+                <div style={{ width: 32, height: 1, backgroundColor: step === "workspace" ? "var(--border-strong)" : "var(--border-color)", margin: "0 4px" }} />
               )}
             </div>
           );
@@ -336,9 +336,9 @@ export default function OnboardingPage() {
       {/* Card */}
       <div style={{
         width: "100%", maxWidth: "460px",
-        backgroundColor: "#13161a", border: "1px solid rgba(255,255,255,0.07)",
+        backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)",
         borderRadius: "20px", padding: "40px 36px",
-        boxShadow: "0 24px 80px rgba(0,0,0,0.4)",
+        boxShadow: "0 24px 80px var(--shadow-color)",
       }}>
 
         {/* ── STEP 1: Profile ── */}
@@ -346,7 +346,7 @@ export default function OnboardingPage() {
           <>
             <div style={{ marginBottom: "28px" }}>
               <h1 style={{ fontSize: "1.4rem", fontWeight: 700, marginBottom: "6px" }}>Set up your profile</h1>
-              <p style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.4)" }}>How you'll appear to your teammates</p>
+              <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>How you'll appear to your teammates</p>
             </div>
 
             {/* Avatar upload */}
@@ -356,92 +356,92 @@ export default function OnboardingPage() {
                   onClick={() => fileInputRef.current?.click()}
                   style={{
                     width: 84, height: 84, borderRadius: "50%", cursor: "pointer",
-                    backgroundColor: "#0f1114", border: "2px dashed rgba(255,255,255,0.12)",
+                    backgroundColor: "var(--bg-input)", border: "2px dashed var(--border-strong)",
                     display: "flex", alignItems: "center", justifyContent: "center",
                     overflow: "hidden", transition: "border-color 0.2s",
                   }}
-                  onMouseEnter={e => (e.currentTarget.style.borderColor = "#E01E5A")}
-                  onMouseLeave={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.12)")}
+                  onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--accent)")}
+                  onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--border-strong)")}
                 >
                   {avatarPreview
                     ? <img src={avatarPreview} alt="avatar" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    : <Upload size={20} color="rgba(255,255,255,0.3)" />
+                    : <Upload size={20} color="var(--text-muted)" />
                   }
                 </div>
                 {avatarPreview && (
                   <button onClick={() => { setAvatarFile(null); setAvatarPreview(""); }} style={{
                     position: "absolute", top: -4, right: -4, width: 22, height: 22,
-                    borderRadius: "50%", backgroundColor: "#E01E5A", border: "none",
+                    borderRadius: "50%", backgroundColor: "var(--accent)", border: "none",
                     display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
                   }}>
-                    <X size={11} color="#fff" />
+                    <X size={11} color="var(--accent-foreground)" />
                   </button>
                 )}
                 <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleAvatarChange} />
               </div>
             </div>
-            <p style={{ textAlign: "center", fontSize: "0.78rem", color: "rgba(255,255,255,0.28)", marginTop: "-20px", marginBottom: "24px" }}>
+            <p style={{ textAlign: "center", fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "-20px", marginBottom: "24px" }}>
               Click to upload photo (optional)
             </p>
 
             {/* Full Name */}
             <div style={{ marginBottom: "14px" }}>
-              <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
-                Full Name <span style={{ color: "#E01E5A" }}>*</span>
+              <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "7px" }}>
+                Full Name <span style={{ color: "var(--accent)" }}>*</span>
               </label>
               <div style={{ position: "relative" }}>
-                <User size={15} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.25)" }} />
+                <User size={15} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
                 <input
                   type="text" placeholder="e.g. John Smith" value={fullName}
                   onChange={e => setFullName(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && handleSaveProfile()}
                   style={{
                     width: "100%", padding: "11px 13px 11px 36px",
-                    backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                    borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
+                    backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                    borderRadius: "9px", color: "var(--text-primary)", fontSize: "0.9rem", outline: "none",
                   }}
-                  onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                  onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                  onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                 />
               </div>
             </div>
 
             {/* Job Title */}
             <div style={{ marginBottom: "24px" }}>
-              <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
-                Job Title / Designation <span style={{ color: "#E01E5A" }}>*</span>
+              <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "7px" }}>
+                Job Title / Designation <span style={{ color: "var(--accent)" }}>*</span>
               </label>
               <div style={{ position: "relative" }}>
-                <Briefcase size={15} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.25)" }} />
+                <Briefcase size={15} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
                 <input
                   type="text" placeholder="e.g. Product Designer, Software Engineer" value={jobTitle}
                   onChange={e => setJobTitle(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && handleSaveProfile()}
                   style={{
                     width: "100%", padding: "11px 13px 11px 36px",
-                    backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                    borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
+                    backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                    borderRadius: "9px", color: "var(--text-primary)", fontSize: "0.9rem", outline: "none",
                   }}
-                  onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                  onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                  onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                 />
               </div>
             </div>
 
             {error && (
-              <p style={{ color: "#f87171", fontSize: "0.82rem", marginBottom: "16px", padding: "10px 14px", backgroundColor: "rgba(248,113,113,0.08)", borderRadius: "8px" }}>
+              <p style={{ color: "var(--error)", fontSize: "0.82rem", marginBottom: "16px", padding: "10px 14px", backgroundColor: "var(--error-bg)", borderRadius: "8px" }}>
                 {error}
               </p>
             )}
 
             <button onClick={handleSaveProfile} style={{
               width: "100%", padding: "13px", borderRadius: "10px",
-              backgroundColor: "#E01E5A", color: "#fff", border: "none",
+              backgroundColor: "var(--accent)", color: "var(--accent-foreground)", border: "none",
               fontSize: "0.95rem", fontWeight: 600, cursor: "pointer",
               display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
             }}
-              onMouseEnter={e => (e.currentTarget.style.backgroundColor = "#c8174f")}
-              onMouseLeave={e => (e.currentTarget.style.backgroundColor = "#E01E5A")}
+              onMouseEnter={e => (e.currentTarget.style.backgroundColor = "var(--accent-hover)")}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = "var(--accent)")}
             >
               Continue <ArrowRight size={16} />
             </button>
@@ -453,20 +453,20 @@ export default function OnboardingPage() {
           <>
             <div style={{ marginBottom: "24px" }}>
               <h1 style={{ fontSize: "1.4rem", fontWeight: 700, marginBottom: "6px" }}>Your workspace</h1>
-              <p style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.4)" }}>Create a new one or join an existing workspace</p>
+              <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>Create a new one or join an existing workspace</p>
             </div>
 
             {/* Toggle */}
             <div style={{
-              display: "flex", backgroundColor: "#0f1114", borderRadius: "10px",
-              padding: "4px", marginBottom: "28px", border: "1px solid rgba(255,255,255,0.06)",
+              display: "flex", backgroundColor: "var(--bg-primary)", borderRadius: "10px",
+              padding: "4px", marginBottom: "28px", border: "1px solid var(--border-color)",
             }}>
               {([["create", "Create workspace"], ["join", "Join workspace"]] as const).map(([m, label]) => (
                 <button key={m} onClick={() => { setWsMode(m); setError(""); }} style={{
                   flex: 1, padding: "8px", borderRadius: "7px", border: "none",
                   fontSize: "0.88rem", fontWeight: 500, cursor: "pointer", transition: "all 0.15s",
-                  backgroundColor: wsMode === m ? "#E01E5A" : "transparent",
-                  color: wsMode === m ? "#fff" : "rgba(255,255,255,0.4)",
+                  backgroundColor: wsMode === m ? "var(--accent)" : "transparent",
+                  color: wsMode === m ? "var(--accent-foreground)" : "var(--text-secondary)",
                 }}>
                   {label}
                 </button>
@@ -481,46 +481,46 @@ export default function OnboardingPage() {
                     onClick={() => wsFileInputRef.current?.click()}
                     style={{
                       width: 60, height: 60, borderRadius: 14, cursor: "pointer", flexShrink: 0,
-                      backgroundColor: "#0f1114", border: "2px dashed rgba(255,255,255,0.12)",
+                      backgroundColor: "var(--bg-input)", border: "2px dashed var(--border-strong)",
                       display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
                     }}
-                    onMouseEnter={e => (e.currentTarget.style.borderColor = "#E01E5A")}
-                    onMouseLeave={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.12)")}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--accent)")}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--border-strong)")}
                   >
                     {wsImagePreview
                       ? <img src={wsImagePreview} alt="ws" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                      : <Plus size={18} color="rgba(255,255,255,0.3)" />
+                      : <Plus size={18} color="var(--text-muted)" />
                     }
                   </div>
                   <div>
-                    <p style={{ fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "3px" }}>Workspace Icon</p>
-                    <p style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.25)" }}>Optional · Click to upload</p>
+                    <p style={{ fontSize: "0.82rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "3px" }}>Workspace Icon</p>
+                    <p style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Optional · Click to upload</p>
                   </div>
                   <input ref={wsFileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleWsImageChange} />
                 </div>
 
                 {/* Workspace name */}
                 <div style={{ marginBottom: "14px" }}>
-                  <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
-                    Workspace Name <span style={{ color: "#E01E5A" }}>*</span>
+                  <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "7px" }}>
+                    Workspace Name <span style={{ color: "var(--accent)" }}>*</span>
                   </label>
                   <input
                     type="text" placeholder="e.g. Acme Corp" value={wsName}
                     onChange={e => setWsName(e.target.value)}
                     style={{
                       width: "100%", padding: "11px 13px",
-                      backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                      borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
+                      backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                      borderRadius: "9px", color: "var(--text-primary)", fontSize: "0.9rem", outline: "none",
                     }}
-                    onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                    onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                    onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                    onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                   />
                 </div>
 
                 {/* Description */}
                 <div style={{ marginBottom: "24px" }}>
-                  <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
-                    Description <span style={{ color: "rgba(255,255,255,0.25)", fontWeight: 400 }}>(optional)</span>
+                  <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "7px" }}>
+                    Description <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(optional)</span>
                   </label>
                   <textarea
                     placeholder="What is this workspace for?" value={wsDescription}
@@ -528,19 +528,19 @@ export default function OnboardingPage() {
                     rows={3}
                     style={{
                       width: "100%", padding: "11px 13px", resize: "none",
-                      backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                      borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
+                      backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                      borderRadius: "9px", color: "var(--text-primary)", fontSize: "0.9rem", outline: "none",
                       fontFamily: "inherit",
                     }}
-                    onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                    onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                    onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                    onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                   />
                 </div>
               </>
             ) : (
               /* Join workspace */
               <div style={{ marginBottom: "24px" }}>
-                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
+                <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "7px" }}>
                   Workspace ID
                 </label>
                 <input
@@ -548,34 +548,34 @@ export default function OnboardingPage() {
                   onChange={e => setJoinId(e.target.value.toUpperCase())}
                   style={{
                     width: "100%", padding: "11px 13px",
-                    backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                    borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
+                    backgroundColor: "var(--bg-input)", border: "1.5px solid var(--border-color)",
+                    borderRadius: "9px", color: "var(--text-primary)", fontSize: "0.9rem", outline: "none",
                     letterSpacing: "0.1em", fontWeight: 600,
                   }}
-                  onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                  onFocus={e => (e.target.style.borderColor = "var(--accent)")}
+                  onBlur={e => (e.target.style.borderColor = "var(--border-color)")}
                 />
-                <p style={{ fontSize: "0.78rem", color: "rgba(255,255,255,0.28)", marginTop: "8px" }}>
+                <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "8px" }}>
                   Ask your workspace admin for the ID to join their workspace.
                 </p>
               </div>
             )}
 
             {error && (
-              <p style={{ color: "#f87171", fontSize: "0.82rem", marginBottom: "16px", padding: "10px 14px", backgroundColor: "rgba(248,113,113,0.08)", borderRadius: "8px" }}>
+              <p style={{ color: "var(--error)", fontSize: "0.82rem", marginBottom: "16px", padding: "10px 14px", backgroundColor: "var(--error-bg)", borderRadius: "8px" }}>
                 {error}
               </p>
             )}
 
             <button onClick={handleWorkspace} disabled={loading} style={{
               width: "100%", padding: "13px", borderRadius: "10px",
-              backgroundColor: "#E01E5A", color: "#fff", border: "none",
+              backgroundColor: "var(--accent)", color: "var(--accent-foreground)", border: "none",
               fontSize: "0.95rem", fontWeight: 600, cursor: loading ? "not-allowed" : "pointer",
               opacity: loading ? 0.7 : 1,
               display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
             }}
-              onMouseEnter={e => { if (!loading) e.currentTarget.style.backgroundColor = "#c8174f"; }}
-              onMouseLeave={e => { e.currentTarget.style.backgroundColor = "#E01E5A"; }}
+              onMouseEnter={e => { if (!loading) e.currentTarget.style.backgroundColor = "var(--accent-hover)"; }}
+              onMouseLeave={e => { e.currentTarget.style.backgroundColor = "var(--accent)"; }}
             >
               {loading && <Loader2 size={17} className="animate-spin" />}
               {wsMode === "create"
@@ -586,7 +586,7 @@ export default function OnboardingPage() {
 
             <button onClick={() => { setStep("profile"); setError(""); }} style={{
               width: "100%", marginTop: "12px", padding: "10px",
-              background: "none", border: "none", color: "rgba(255,255,255,0.3)",
+              background: "none", border: "none", color: "var(--text-muted)",
               fontSize: "0.83rem", cursor: "pointer",
             }}>
               ← Back to profile
