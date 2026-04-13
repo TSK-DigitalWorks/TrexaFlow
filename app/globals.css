@@ -22,37 +22,8 @@ body {
   min-height: 100vh;
 }
 
-/* ── Dark Theme (default) ── */
+/* ── Light Theme (default) ── */
 :root,
-[data-theme="dark"] {
-  --bg-primary:       #0f1114;
-  --bg-secondary:     #13161a;
-  --bg-tertiary:      #1e2227;
-  --bg-sidebar:       #13161a;
-  --bg-sidebar-item:  rgba(255,255,255,0.05);
-  --bg-hover:         rgba(255,255,255,0.05);
-  --bg-active:        rgba(255,255,255,0.08);
-  --bg-input:         #1e2227;
-  --bg-topbar:        #13161a;
-  --bg-message-hover: rgba(255,255,255,0.03);
-  --border-color:     rgba(255,255,255,0.06);
-  --border-strong:    rgba(255,255,255,0.1);
-  --text-primary:     #ffffff;
-  --text-secondary:   rgba(255,255,255,0.5);
-  --text-muted:       rgba(255,255,255,0.3);
-  --text-faint:       rgba(255,255,255,0.18);
-  --text-inverse:     #1a1a1a;
-  --icon-color:       rgba(255,255,255,0.4);
-  --icon-hover:       #ffffff;
-  --shadow-color:     rgba(0,0,0,0.35);
-  --scrollbar-thumb:  rgba(255,255,255,0.08);
-  --accent:           #E01E5A;
-  --unread-dot:       #4ade80;
-  --divider:          rgba(255,255,255,0.06);
-  --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
-}
-
-/* ── Light Theme ── */
 [data-theme="light"] {
   --bg-primary:       #f5f5f5;
   --bg-secondary:     #ffffff;
@@ -79,38 +50,51 @@ body {
   --unread-dot:       #16a34a;
   --divider:          rgba(0,0,0,0.07);
   --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
+  --accent-foreground: #ffffff;
+  --accent-hover:     #c8174f;
+  --accent-alpha-12:  rgba(224,30,90,0.12);
+  --accent-alpha-20:  rgba(224,30,90,0.2);
+  --error:            #f87171;
+  --error-bg:         rgba(248,113,113,0.08);
+  --success:          #16a34a;
 }
 
-/* ── System Default ── */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    --bg-primary:       #f5f5f5;
-    --bg-secondary:     #ffffff;
-    --bg-tertiary:      #ebebeb;
-    --bg-sidebar:       #e8e8e8;
-    --bg-sidebar-item:  rgba(0,0,0,0.06);
-    --bg-hover:         rgba(0,0,0,0.05);
-    --bg-active:        rgba(0,0,0,0.09);
-    --bg-input:         #ffffff;
-    --bg-topbar:        #ffffff;
-    --bg-message-hover: rgba(0,0,0,0.03);
-    --border-color:     rgba(0,0,0,0.08);
-    --border-strong:    rgba(0,0,0,0.14);
-    --text-primary:     #111111;
-    --text-secondary:   rgba(0,0,0,0.6);
-    --text-muted:       rgba(0,0,0,0.4);
-    --text-faint:       rgba(0,0,0,0.25);
-    --text-inverse:     #ffffff;
-    --icon-color:       rgba(0,0,0,0.45);
-    --icon-hover:       #111111;
-    --shadow-color:     rgba(0,0,0,0.1);
-    --scrollbar-thumb:  rgba(0,0,0,0.15);
-    --accent:           #E01E5A;
-    --unread-dot:       #16a34a;
-    --divider:          rgba(0,0,0,0.07);
-    --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
-  }
+/* ── Dark Theme ── */
+[data-theme="dark"] {
+  --bg-primary:       #0f1114;
+  --bg-secondary:     #13161a;
+  --bg-tertiary:      #1e2227;
+  --bg-sidebar:       #13161a;
+  --bg-sidebar-item:  rgba(255,255,255,0.05);
+  --bg-hover:         rgba(255,255,255,0.05);
+  --bg-active:        rgba(255,255,255,0.08);
+  --bg-input:         #1e2227;
+  --bg-topbar:        #13161a;
+  --bg-message-hover: rgba(255,255,255,0.03);
+  --border-color:     rgba(255,255,255,0.06);
+  --border-strong:    rgba(255,255,255,0.1);
+  --text-primary:     #ffffff;
+  --text-secondary:   rgba(255,255,255,0.5);
+  --text-muted:       rgba(255,255,255,0.3);
+  --text-faint:       rgba(255,255,255,0.18);
+  --text-inverse:     #1a1a1a;
+  --icon-color:       rgba(255,255,255,0.4);
+  --icon-hover:       #ffffff;
+  --shadow-color:     rgba(0,0,0,0.35);
+  --scrollbar-thumb:  rgba(255,255,255,0.08);
+  --accent:           #E01E5A;
+  --unread-dot:       #4ade80;
+  --divider:          rgba(255,255,255,0.06);
+  --banner-gradient:  linear-gradient(135deg, #E01E5A 0%, #c084fc 100%);
+  --accent-foreground: #ffffff;
+  --accent-hover:     #c8174f;
+  --accent-alpha-12:  rgba(224,30,90,0.12);
+  --accent-alpha-20:  rgba(224,30,90,0.2);
+  --error:            #f87171;
+  --error-bg:         rgba(248,113,113,0.08);
+  --success:          #4ade80;
 }
+
 
 /* ── Scrollbar theming ── */
 ::-webkit-scrollbar { width: 5px; }

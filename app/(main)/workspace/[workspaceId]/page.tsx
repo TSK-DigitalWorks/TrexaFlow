@@ -454,7 +454,7 @@ function WorkspacePage() {
   const [dmUnreadCounts, setDmUnreadCounts] = useState<Record<string, number>>({});
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
-  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [showThemePicker, setShowThemePicker] = useState(false);
 
   // Sidebar section collapse state
@@ -679,9 +679,10 @@ function WorkspacePage() {
 
   // Theme init
   useEffect(() => {
-    const saved = (localStorage.getItem("trexaflow_theme") as ThemeMode) || "dark";
-    setThemeMode(saved);
-    applyTheme(saved);
+    const saved = localStorage.getItem("trexaflow_theme") as ThemeMode;
+    const mode = saved ?? "light";
+    setThemeMode(mode);
+    // Do NOT call applyTheme(mode) here as it's handled by the layout script
   }, []);
 
   // Load sidebar collapse state

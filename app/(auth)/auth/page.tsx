@@ -1,146 +1,149 @@
-"use client";
+'use client';
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { MessageSquare, Mail, Lock, Eye, EyeOff, ArrowRight, Loader2 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import {
+  MessageSquare, Mail, Lock, Eye, EyeOff, ArrowRight, Loader2,
+} from 'lucide-react';
+import { supabase } from '@/lib/supabase';
 
-type Mode = "login" | "signup" | "otp";
+type Mode = 'login' | 'signup' | 'otp';
 
 export default function AuthPage() {
   const router = useRouter();
-  const [mode, setMode] = useState<Mode>("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState(["", "", "", "", "", "", "", ""]);
+  const [mode, setMode] = useState<Mode>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [otp, setOtp] = useState(['', '', '', '', '', '', '', '']);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [successMsg, setSuccessMsg] = useState("");
+  const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
 
-  const clearMessages = () => { setError(""); setSuccessMsg(""); };
+  const clearMessages = () => { setError(''); setSuccessMsg(''); };
 
   const handleOtpChange = (val: string, idx: number) => {
     if (!/^\d*$/.test(val)) return;
-    const next = [...otp];
-    next[idx] = val.slice(-1);
-    setOtp(next);
-    if (val && idx < 7) document.getElementById(`otp-${idx + 1}`)?.focus();
+    const next = [...otp]; next[idx] = val.slice(-1); setOtp(next);
+    if (val && idx < 7) (document.getElementById(`otp-${idx + 1}`) as HTMLInputElement)?.focus();
   };
 
   const handleOtpKeyDown = (e: React.KeyboardEvent, idx: number) => {
-    if (e.key === "Backspace" && !otp[idx] && idx > 0)
-      document.getElementById(`otp-${idx - 1}`)?.focus();
+    if (e.key === 'Backspace' && !otp[idx] && idx > 0)
+      (document.getElementById(`otp-${idx - 1}`) as HTMLInputElement)?.focus();
   };
 
   const handleOtpPaste = (e: React.ClipboardEvent, idx: number) => {
     e.preventDefault();
-    const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 8);
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 8);
     if (!pasted) return;
     const next = [...otp];
-    for (let i = 0; i < pasted.length; i++) {
-      if (idx + i < 8) next[idx + i] = pasted[i];
-    }
+    for (let i = 0; i < pasted.length; i++) { if (idx + i < 8) next[idx + i] = pasted[i]; }
     setOtp(next);
     const lastFilled = Math.min(idx + pasted.length, 7);
-    document.getElementById(`otp-${lastFilled}`)?.focus();
+    (document.getElementById(`otp-${lastFilled}`) as HTMLInputElement)?.focus();
   };
 
-  // ── Sign Up: create account then send OTP ──
   const handleSignUp = async () => {
     clearMessages();
-    if (!email || !password) return setError("Please enter your email and password.");
-    if (password.length < 8) return setError("Password must be at least 8 characters.");
+    if (!email || !password) return setError('Please enter your email and password.');
+    if (password.length < 8) return setError('Password must be at least 8 characters.');
     setLoading(true);
-    // First create the account
     const { error: signUpError } = await supabase.auth.signUp({ email, password });
     setLoading(false);
     if (signUpError) return setError(signUpError.message);
-    setMode("otp");
+    setMode('otp');
     setSuccessMsg(`An 8-digit code was sent to ${email}`);
   };
 
-  // ── Verify OTP after signup ──
   const handleVerifyOtp = async () => {
     clearMessages();
-    const code = otp.join("");
-    if (code.length < 8) return setError("Please enter the full 8-digit code.");
+    const code = otp.join('');
+    if (code.length < 8) return setError('Please enter the full 8-digit code.');
     setLoading(true);
-    const { error } = await supabase.auth.verifyOtp({
-      email,
-      token: code,
-      type: "signup",
-    });
+    const { error } = await supabase.auth.verifyOtp({ email, token: code, type: 'signup' });
     setLoading(false);
-    if (error) return setError("Invalid or expired code. Please try again.");
+    if (error) return setError('Invalid or expired code. Please try again.');
     const { data: { user } } = await supabase.auth.getUser();
     if (user) await redirectAfterAuth(user.id);
   };
 
-  // ── Resend OTP ──
   const handleResend = async () => {
     clearMessages();
     setLoading(true);
-    const { error } = await supabase.auth.resend({ type: "signup", email });
+    const { error } = await supabase.auth.resend({ type: 'signup', email });
     setLoading(false);
     if (error) return setError(error.message);
-    setSuccessMsg("A new code has been sent to your email.");
-    setOtp(["", "", "", "", "", "", "", ""]);
+    setSuccessMsg('A new code has been sent to your email.');
+    setOtp(['', '', '', '', '', '', '', '']);
   };
 
-  // ── Login ──
   const handleLogin = async () => {
     clearMessages();
-    if (!email || !password) return setError("Please enter your email and password.");
+    if (!email || !password) return setError('Please enter your email and password.');
     setLoading(true);
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (error) return setError("Incorrect email or password.");
+    if (error) return setError('Incorrect email or password.');
     const { data: { user: loggedInUser } } = await supabase.auth.getUser();
     if (loggedInUser) await redirectAfterAuth(loggedInUser.id);
   };
 
-  const switchMode = (m: Mode) => { clearMessages(); setOtp(["","","","","","","",""]); setMode(m); };
+  const switchMode = (m: Mode) => { clearMessages(); setOtp(['','','','','','','','']); setMode(m); };
 
   const redirectAfterAuth = async (userId: string) => {
-    // Check if user already completed onboarding
-    const { data: profile } = await supabase.from("users").select("id").eq("id", userId).single();
-    if (!profile) return router.push("/onboarding");
-
-    // Check if user already has a workspace
+    const { data: profile } = await supabase.from('users').select('id').eq('id', userId).single();
+    if (!profile) return router.push('/onboarding');
     const { data: membership } = await supabase
-      .from("workspace_members")
-      .select("workspace_id")
-      .eq("user_id", userId)
-      .limit(1)
-      .single();
+      .from('workspace_members').select('workspace_id').eq('user_id', userId).limit(1).single();
+    if (membership) router.push(`/workspace/${membership.workspace_id}`);
+    else router.push('/onboarding');
+  };
 
-    if (membership) {
-      router.push(`/workspace/${membership.workspace_id}`);
-    } else {
-      router.push("/onboarding");
-    }
+  // ── Shared input style (uses CSS vars) ──────────────────────────────────────
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '11px 13px 11px 38px',
+    backgroundColor: 'var(--bg-input)',
+    border: '1.5px solid var(--border-color)',
+    borderRadius: 9,
+    color: 'var(--text-primary)',
+    fontSize: '0.9rem',
+    outline: 'none',
   };
 
   return (
     <div style={{
-      minHeight: "100vh", backgroundColor: "#0f1114",
-      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      padding: "24px", fontFamily: "var(--font-geist-sans), -apple-system, sans-serif",
+      minHeight: '100vh',
+      backgroundColor: 'var(--bg-primary)',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 24,
     }}>
-
       {/* Top logo bar */}
-      <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: "60px", display: "flex", alignItems: "center", padding: "0 32px" }}>
-        <button onClick={() => router.push("/")} style={{
-          display: "flex", alignItems: "center", gap: "8px",
-          background: "none", border: "none", color: "rgba(255,255,255,0.4)",
-          cursor: "pointer", fontSize: "0.9rem", fontWeight: 500,
-        }}
-          onMouseEnter={e => (e.currentTarget.style.color = "#fff")}
-          onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.4)")}
+      <div style={{
+        position: 'fixed', top: 0, left: 0, right: 0, height: 60,
+        display: 'flex', alignItems: 'center', padding: '0 32px',
+      }}>
+        <button
+          onClick={() => router.push('/')}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            background: 'none', border: 'none',
+            color: 'var(--text-secondary)', cursor: 'pointer',
+            fontSize: '0.9rem', fontWeight: 500,
+          }}
+          onMouseEnter={e => (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'}
+          onMouseLeave={e => (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)'}
         >
-          <div style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <MessageSquare size={14} color="#fff" />
+          <div style={{
+            width: 28, height: 28, borderRadius: 8,
+            backgroundColor: 'var(--accent)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <MessageSquare size={14} color="var(--accent-foreground)" />
           </div>
           TrexaFlow
         </button>
@@ -148,205 +151,233 @@ export default function AuthPage() {
 
       {/* Card */}
       <div style={{
-        width: "100%", maxWidth: "420px",
-        backgroundColor: "#13161a", border: "1px solid rgba(255,255,255,0.07)",
-        borderRadius: "20px", padding: "40px 36px",
-        boxShadow: "0 24px 80px rgba(0,0,0,0.4)",
+        width: '100%', maxWidth: 420,
+        backgroundColor: 'var(--bg-secondary)',
+        border: '1px solid var(--border-color)',
+        borderRadius: 20,
+        padding: '40px 36px',
+        boxShadow: '0 24px 80px var(--shadow-color)',
       }}>
 
         {/* ── OTP Screen ── */}
-        {mode === "otp" ? (
+        {mode === 'otp' ? (
           <>
-            <div style={{ textAlign: "center", marginBottom: "32px" }}>
+            <div style={{ textAlign: 'center', marginBottom: 32 }}>
               <div style={{
                 width: 52, height: 52, borderRadius: 14,
-                backgroundColor: "rgba(224,30,90,0.12)", border: "1px solid rgba(224,30,90,0.2)",
-                display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px",
+                backgroundColor: 'var(--accent-alpha-12)',
+                border: '1px solid var(--accent-alpha-20)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
               }}>
-                <Mail size={22} color="#E01E5A" />
+                <Mail size={22} color="var(--accent)" />
               </div>
-              <h1 style={{ fontSize: "1.4rem", fontWeight: 700, color: "#fff", marginBottom: "8px" }}>Check your email</h1>
-              <p style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.45)", lineHeight: 1.6 }}>
+              <h1 style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 8 }}>
+                Check your email
+              </h1>
+              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
                 We sent an 8-digit code to<br />
-                <span style={{ color: "rgba(255,255,255,0.75)", fontWeight: 500 }}>{email}</span>
+                <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{email}</span>
               </p>
             </div>
 
-            {/* 6-box OTP input */}
-            <div style={{ display: "flex", gap: "10px", justifyContent: "center", marginBottom: "24px" }}>
+            {/* OTP boxes */}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 24 }}>
               {otp.map((digit, idx) => (
-                <input key={idx} id={`otp-${idx}`}
-                  type="text" inputMode="numeric" maxLength={1} value={digit}
+                <input
+                  key={idx}
+                  id={`otp-${idx}`}
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={1}
+                  value={digit}
                   onChange={e => handleOtpChange(e.target.value, idx)}
                   onKeyDown={e => handleOtpKeyDown(e, idx)}
                   onPaste={e => handleOtpPaste(e, idx)}
                   style={{
-                    width: "40px", height: "50px", textAlign: "center",
-                    fontSize: "1.3rem", fontWeight: 700, color: "#fff",
-                    backgroundColor: "#0f1114",
-                    border: `1.5px solid ${digit ? "#E01E5A" : "rgba(255,255,255,0.1)"}`,
-                    borderRadius: "10px", outline: "none", transition: "border-color 0.15s",
+                    width: 40, height: 50, textAlign: 'center',
+                    fontSize: '1.3rem', fontWeight: 700,
+                    color: 'var(--text-primary)',
+                    backgroundColor: 'var(--bg-input)',
+                    border: `1.5px solid ${digit ? 'var(--accent)' : 'var(--border-color)'}`,
+                    borderRadius: 10, outline: 'none',
+                    transition: 'border-color 0.15s',
                   }}
-                  onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = digit ? "#E01E5A" : "rgba(255,255,255,0.1)")}
+                  onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+                  onBlur={e => e.target.style.borderColor = digit ? 'var(--accent)' : 'var(--border-color)'}
                 />
               ))}
             </div>
 
             {error && (
-              <p style={{ color: "#f87171", fontSize: "0.82rem", textAlign: "center", marginBottom: "16px", padding: "10px", backgroundColor: "rgba(248,113,113,0.08)", borderRadius: "8px" }}>
+              <p style={{ color: 'var(--error)', fontSize: '0.82rem', textAlign: 'center', marginBottom: 16, padding: 10, backgroundColor: 'var(--error-bg)', borderRadius: 8 }}>
                 {error}
               </p>
             )}
             {successMsg && (
-              <p style={{ color: "#4ade80", fontSize: "0.82rem", textAlign: "center", marginBottom: "16px" }}>
+              <p style={{ color: 'var(--success)', fontSize: '0.82rem', textAlign: 'center', marginBottom: 16 }}>
                 {successMsg}
               </p>
             )}
 
-            <button onClick={handleVerifyOtp} disabled={loading} style={{
-              width: "100%", padding: "13px", borderRadius: "10px",
-              backgroundColor: "#E01E5A", color: "#fff", border: "none",
-              fontSize: "0.95rem", fontWeight: 600, cursor: loading ? "not-allowed" : "pointer",
-              opacity: loading ? 0.7 : 1,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-            }}>
+            <button
+              onClick={handleVerifyOtp}
+              disabled={loading}
+              style={{
+                width: '100%', padding: 13, borderRadius: 10,
+                backgroundColor: 'var(--accent)', color: 'var(--accent-foreground)', border: 'none',
+                fontSize: '0.95rem', fontWeight: 600,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                opacity: loading ? 0.7 : 1,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              }}
+            >
               {loading && <Loader2 size={17} className="animate-spin" />}
               Verify & Continue
             </button>
 
-            <p style={{ textAlign: "center", marginTop: "20px", fontSize: "0.83rem", color: "rgba(255,255,255,0.35)" }}>
-              Didn't receive it?{" "}
-              <button onClick={handleResend} disabled={loading} style={{
-                background: "none", border: "none", color: "#E01E5A",
-                cursor: "pointer", fontWeight: 500, fontSize: "0.83rem",
-              }}>
+            <p style={{ textAlign: 'center', marginTop: 20, fontSize: '0.83rem', color: 'var(--text-muted)' }}>
+              Didn't receive it?{' '}
+              <button
+                onClick={handleResend}
+                disabled={loading}
+                style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontWeight: 500, fontSize: '0.83rem' }}
+              >
                 Resend code
               </button>
             </p>
-            <p style={{ textAlign: "center", marginTop: "10px" }}>
-              <button onClick={() => switchMode("signup")} style={{
-                background: "none", border: "none", color: "rgba(255,255,255,0.3)",
-                cursor: "pointer", fontSize: "0.83rem",
-              }}>
+            <p style={{ textAlign: 'center', marginTop: 10 }}>
+              <button
+                onClick={() => switchMode('signup')}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.83rem' }}
+              >
                 ← Back to sign up
               </button>
             </p>
           </>
-
         ) : (
           <>
             {/* ── Login / Signup ── */}
-            <div style={{ textAlign: "center", marginBottom: "32px" }}>
-              <h1 style={{ fontSize: "1.5rem", fontWeight: 700, color: "#fff", marginBottom: "8px" }}>
-                {mode === "login" ? "Welcome back" : "Create your account"}
+            <div style={{ textAlign: 'center', marginBottom: 32 }}>
+              <h1 style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 8 }}>
+                {mode === 'login' ? 'Welcome back' : 'Create your account'}
               </h1>
-              <p style={{ fontSize: "0.875rem", color: "rgba(255,255,255,0.4)" }}>
-                {mode === "login" ? "Sign in to your TrexaFlow account" : "Start communicating with your team"}
+              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                {mode === 'login' ? 'Sign in to your TrexaFlow account' : 'Start communicating with your team'}
               </p>
             </div>
 
             {/* Tab switcher */}
             <div style={{
-              display: "flex", backgroundColor: "#0f1114", borderRadius: "10px",
-              padding: "4px", marginBottom: "28px", border: "1px solid rgba(255,255,255,0.06)",
+              display: 'flex',
+              backgroundColor: 'var(--bg-primary)',
+              borderRadius: 10, padding: 4, marginBottom: 28,
+              border: '1px solid var(--border-color)',
             }}>
-              {(["login", "signup"] as Mode[]).map(m => (
-                <button key={m} onClick={() => switchMode(m)} style={{
-                  flex: 1, padding: "8px", borderRadius: "7px", border: "none",
-                  fontSize: "0.88rem", fontWeight: 500, cursor: "pointer", transition: "all 0.15s",
-                  backgroundColor: mode === m ? "#E01E5A" : "transparent",
-                  color: mode === m ? "#fff" : "rgba(255,255,255,0.4)",
-                }}>
-                  {m === "login" ? "Sign in" : "Sign up"}
+              {(['login', 'signup'] as Mode[]).map(m => (
+                <button
+                  key={m}
+                  onClick={() => switchMode(m)}
+                  style={{
+                    flex: 1, padding: 8, borderRadius: 7, border: 'none',
+                    fontSize: '0.88rem', fontWeight: 500, cursor: 'pointer',
+                    transition: 'all 0.15s',
+                    backgroundColor: mode === m ? 'var(--accent)' : 'transparent',
+                    color: mode === m ? 'var(--accent-foreground)' : 'var(--text-secondary)',
+                  }}
+                >
+                  {m === 'login' ? 'Sign in' : 'Sign up'}
                 </button>
               ))}
             </div>
 
             {/* Email */}
-            <div style={{ marginBottom: "14px" }}>
-              <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 7 }}>
                 Email address
               </label>
-              <div style={{ position: "relative" }}>
-                <Mail size={16} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.25)" }} />
-                <input type="email" placeholder="you@company.com" value={email}
+              <div style={{ position: 'relative' }}>
+                <Mail size={16} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: 'var(--icon-color)' }} />
+                <input
+                  type="email"
+                  placeholder="you@company.com"
+                  value={email}
                   onChange={e => setEmail(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && (mode === "login" ? handleLogin() : handleSignUp())}
-                  style={{
-                    width: "100%", padding: "11px 13px 11px 38px",
-                    backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                    borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
-                  }}
-                  onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                  onKeyDown={e => e.key === 'Enter' && (mode === 'login' ? handleLogin() : handleSignUp())}
+                  style={inputStyle}
+                  onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+                  onBlur={e => e.target.style.borderColor = 'var(--border-color)'}
                 />
               </div>
             </div>
 
             {/* Password */}
-            <div style={{ marginBottom: "22px" }}>
-              <label style={{ display: "block", fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.55)", marginBottom: "7px" }}>
+            <div style={{ marginBottom: 22 }}>
+              <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 7 }}>
                 Password
               </label>
-              <div style={{ position: "relative" }}>
-                <Lock size={16} style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.25)" }} />
+              <div style={{ position: 'relative' }}>
+                <Lock size={16} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: 'var(--icon-color)' }} />
                 <input
-                  type={showPassword ? "text" : "password"}
-                  placeholder={mode === "signup" ? "Min. 8 characters" : "Enter your password"}
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder={mode === 'signup' ? 'Min. 8 characters' : 'Enter your password'}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && (mode === "login" ? handleLogin() : handleSignUp())}
-                  style={{
-                    width: "100%", padding: "11px 40px 11px 38px",
-                    backgroundColor: "#0f1114", border: "1.5px solid rgba(255,255,255,0.08)",
-                    borderRadius: "9px", color: "#fff", fontSize: "0.9rem", outline: "none",
-                  }}
-                  onFocus={e => (e.target.style.borderColor = "#E01E5A")}
-                  onBlur={e => (e.target.style.borderColor = "rgba(255,255,255,0.08)")}
+                  onKeyDown={e => e.key === 'Enter' && (mode === 'login' ? handleLogin() : handleSignUp())}
+                  style={{ ...inputStyle, paddingRight: 40 }}
+                  onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+                  onBlur={e => e.target.style.borderColor = 'var(--border-color)'}
                 />
-                <button onClick={() => setShowPassword(p => !p)} style={{
-                  position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
-                  background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.3)", padding: 0,
-                }}>
+                <button
+                  onClick={() => setShowPassword(p => !p)}
+                  style={{
+                    position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'var(--icon-color)', padding: 0,
+                  }}
+                >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
             </div>
 
             {error && (
-              <p style={{ color: "#f87171", fontSize: "0.82rem", marginBottom: "16px", padding: "10px 14px", backgroundColor: "rgba(248,113,113,0.08)", borderRadius: "8px" }}>
+              <p style={{ color: 'var(--error)', fontSize: '0.82rem', marginBottom: 16, padding: '10px 14px', backgroundColor: 'var(--error-bg)', borderRadius: 8 }}>
                 {error}
               </p>
             )}
 
-            <button onClick={mode === "login" ? handleLogin : handleSignUp} disabled={loading} style={{
-              width: "100%", padding: "13px", borderRadius: "10px",
-              backgroundColor: "#E01E5A", color: "#fff", border: "none",
-              fontSize: "0.95rem", fontWeight: 600, cursor: loading ? "not-allowed" : "pointer",
-              opacity: loading ? 0.7 : 1,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
-            }}
-              onMouseEnter={e => { if (!loading) e.currentTarget.style.backgroundColor = "#c8174f"; }}
-              onMouseLeave={e => { e.currentTarget.style.backgroundColor = "#E01E5A"; }}
+            <button
+              onClick={mode === 'login' ? handleLogin : handleSignUp}
+              disabled={loading}
+              style={{
+                width: '100%', padding: 13, borderRadius: 10,
+                backgroundColor: 'var(--accent)', color: 'var(--accent-foreground)', border: 'none',
+                fontSize: '0.95rem', fontWeight: 600,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                opacity: loading ? 0.7 : 1,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              }}
+              onMouseEnter={e => { if (!loading) (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--accent-hover)'; }}
+              onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = 'var(--accent)'}
             >
               {loading && <Loader2 size={17} className="animate-spin" />}
-              {mode === "login" ? "Sign in" : "Create account"}
+              {mode === 'login' ? 'Sign in' : 'Create account'}
               {!loading && <ArrowRight size={16} />}
             </button>
 
-            <p style={{ textAlign: "center", marginTop: "20px", fontSize: "0.82rem", color: "rgba(255,255,255,0.3)" }}>
-              {mode === "login" ? "Don't have an account? " : "Already have an account? "}
-              <button onClick={() => switchMode(mode === "login" ? "signup" : "login")} style={{
-                background: "none", border: "none", color: "#E01E5A",
-                cursor: "pointer", fontWeight: 500, fontSize: "0.82rem",
-              }}>
-                {mode === "login" ? "Sign up free" : "Sign in"}
+            <p style={{ textAlign: 'center', marginTop: 20, fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+              {mode === 'login' ? "Don't have an account?" : 'Already have an account?'}{' '}
+              <button
+                onClick={() => switchMode(mode === 'login' ? 'signup' : 'login')}
+                style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontWeight: 500, fontSize: '0.82rem' }}
+              >
+                {mode === 'login' ? 'Sign up free' : 'Sign in'}
               </button>
             </p>
           </>
         )}
       </div>
     </div>
-  )
+  );
 }
