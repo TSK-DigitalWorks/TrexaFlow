@@ -456,6 +456,7 @@ function WorkspacePage() {
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [showThemePicker, setShowThemePicker] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   // Sidebar section collapse state
   const [sidebarChannelsOpen, setSidebarChannelsOpen] = useState(true);
@@ -2708,6 +2709,11 @@ function WorkspacePage() {
     setProfileEditImagePreview(null);
   };
 
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.replace("/");
+  }
+
   // ─── Save workspace edit ──────────────────────────────────
   const saveWorkspaceEdit = async () => {
     if (!workspace || !wsEditName.trim()) return;
@@ -3758,17 +3764,9 @@ function WorkspacePage() {
         zIndex: 100,
       }}>
         <img
-          src={resolvedLogoTheme === 'light'
-            ? '/Logo_Standard_dark_transp.png'
-            : '/Logo_Standard_light_transp.png'
-          }
+          src={resolvedLogoTheme === 'light' ? '/LogoStandarddarktransp.png' : '/LogoStandardlighttransp.png'}
           alt="TrexaFlow"
-          style={{
-            height: 28,
-            width: 'auto',
-            objectFit: 'contain',
-            userSelect: 'none',
-          }}
+          style={{ height: 28, width: 'auto', objectFit: 'contain', userSelect: 'none' }}
         />
       </div>
 
@@ -6079,7 +6077,7 @@ function WorkspacePage() {
         {/* ── PROFILE MODAL ── */}
         {showProfileModal && me && (
           <div
-            onClick={e => { if (e.target === e.currentTarget) { setShowProfileModal(false); setEditingProfile(false); } }}
+            onClick={e => { if (e.target === e.currentTarget) { setShowProfileModal(false); setEditingProfile(false); setShowLogoutConfirm(false); } }}
             style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(4px)", padding: 20, animation: "fadeIn 0.15s ease" }}
           >
             <div style={{ backgroundColor: "var(--bg-secondary)", borderRadius: 16, width: "100%", maxWidth: 420, boxShadow: "0 24px 64px rgba(0,0,0,0.4)", border: "1px solid var(--border-color)", overflow: "hidden", animation: "slideUp 0.2s ease" }}>
@@ -6087,7 +6085,7 @@ function WorkspacePage() {
               {/* Banner */}
               <div style={{ height: 72, background: "var(--banner-gradient)", position: "relative" }}>
                 <button
-                  onClick={() => { setShowProfileModal(false); setEditingProfile(false); }}
+                  onClick={() => { setShowProfileModal(false); setEditingProfile(false); setShowLogoutConfirm(false); }}
                   style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,0.4)", border: "none", borderRadius: "50%", width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff" }}
                 ><X size={14} /></button>
               </div>
@@ -6118,6 +6116,70 @@ function WorkspacePage() {
                       onMouseEnter={e => e.currentTarget.style.backgroundColor = "var(--bg-hover)"}
                       onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
                     >Edit Profile</button>
+
+                    {/* ── Log out ── */}
+                    {!showLogoutConfirm ? (
+                      <button
+                        onClick={() => setShowLogoutConfirm(true)}
+                        style={{
+                          width: "100%", marginTop: 6, padding: 10, borderRadius: 9,
+                          border: "1px solid rgba(248,113,113,0.25)",
+                          backgroundColor: "transparent", color: "#f87171",
+                          fontSize: "0.88rem", fontWeight: 600, cursor: "pointer",
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
+                          transition: "all 0.15s",
+                        }}
+                        onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = "rgba(248,113,113,0.08)"}
+                        onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = "transparent"}
+                      >
+                        <LogOut size={15} />
+                        Log out
+                      </button>
+                    ) : (
+                      <div style={{
+                        marginTop: 6, padding: 14, borderRadius: 10,
+                        border: "1px solid rgba(248,113,113,0.25)",
+                        backgroundColor: "rgba(248,113,113,0.05)",
+                      }}>
+                        <p style={{ fontSize: "0.85rem", color: "var(--text-primary)", fontWeight: 600, marginBottom: 4 }}>
+                          Log out of TrexaFlow?
+                        </p>
+                        <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+                          You'll be signed out of your account on this device.
+                        </p>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            onClick={handleLogout}
+                            style={{
+                              flex: 1, padding: 9, borderRadius: 8,
+                              border: "none", backgroundColor: "#f87171",
+                              color: "#fff", fontSize: "0.85rem", fontWeight: 600,
+                              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                              transition: "opacity 0.15s",
+                            }}
+                            onMouseEnter={e => (e.currentTarget as HTMLElement).style.opacity = "0.88"}
+                            onMouseLeave={e => (e.currentTarget as HTMLElement).style.opacity = "1"}
+                          >
+                            <LogOut size={14} />
+                            Yes, log out
+                          </button>
+                          <button
+                            onClick={() => setShowLogoutConfirm(false)}
+                            style={{
+                              flex: 1, padding: 9, borderRadius: 8,
+                              border: "1px solid var(--border-color)",
+                              backgroundColor: "transparent", color: "var(--text-muted)",
+                              fontSize: "0.85rem", fontWeight: 600, cursor: "pointer",
+                              transition: "all 0.15s",
+                            }}
+                            onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = "var(--bg-hover)"}
+                            onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = "transparent"}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   /* ── Edit profile form ── */
@@ -7131,9 +7193,32 @@ function WorkspacePage() {
               </span>
               <div style={{ flex: 1 }} />
               <button
-                onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false) }}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 20 }}
-              >×</button>
+                onClick={() => { setShowTaskPanel(false); setShowRevisionInput(false); }}
+                aria-label="Close task panel"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "var(--text-muted)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "4px",
+                  borderRadius: "6px",
+                  flexShrink: 0,
+                  transition: "all 150ms",
+                }}
+                onMouseEnter={e => {
+                  (e.currentTarget as HTMLElement).style.color = "var(--text-primary)";
+                  (e.currentTarget as HTMLElement).style.backgroundColor = "var(--bg-hover)";
+                }}
+                onMouseLeave={e => {
+                  (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
+                  (e.currentTarget as HTMLElement).style.backgroundColor = "transparent";
+                }}
+              >
+                <X size={18} />
+              </button>
             </div>
 
             <div style={{ padding: '20px 22px', flex: 1, display: 'flex', flexDirection: 'column', gap: 18 }}>

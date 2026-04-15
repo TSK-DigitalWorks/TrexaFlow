@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  MessageSquare, Mail, Lock, Eye, EyeOff, ArrowRight, Loader2,
+  Mail, Lock, Eye, EyeOff, ArrowRight, Loader2,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 
@@ -19,6 +19,24 @@ export default function AuthPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [logoTheme, setLogoTheme] = useState<'light' | 'dark'>('light');
+
+  // Handle logo theme sync
+  useEffect(() => {
+    const html = document.documentElement;
+    const updateLogo = () => {
+      const current = html.getAttribute('data-theme') as 'light' | 'dark' | null;
+      if (current) setLogoTheme(current);
+      else {
+        // Fallback to media query if no data-theme
+        setLogoTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      }
+    };
+    updateLogo();
+    const obs = new MutationObserver(updateLogo);
+    obs.observe(html, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => obs.disconnect();
+  }, []);
 
   const clearMessages = () => { setError(''); setSuccessMsg(''); };
 
@@ -138,14 +156,11 @@ export default function AuthPage() {
           onMouseEnter={e => (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'}
           onMouseLeave={e => (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)'}
         >
-          <div style={{
-            width: 28, height: 28, borderRadius: 8,
-            backgroundColor: 'var(--accent)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <MessageSquare size={14} color="var(--accent-foreground)" />
-          </div>
-          TrexaFlow
+          <img
+            src={logoTheme === 'light' ? '/LogoStandarddarktransp.png' : '/LogoStandardlighttransp.png'}
+            alt="TrexaFlow"
+            style={{ height: 26, width: 'auto', objectFit: 'contain', userSelect: 'none' }}
+          />
         </button>
       </div>
 

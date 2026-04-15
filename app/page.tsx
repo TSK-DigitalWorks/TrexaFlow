@@ -78,16 +78,6 @@ function RevealDiv({ children, style, delay = 0 }: { children: React.ReactNode; 
   return <div ref={ref} style={style}>{children}</div>;
 }
 
-// ─── Logo SVG ─────────────────────────────────────────────────────────────────
-function Logo({ size = 32 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-label="TrexaFlow logo">
-      <rect width="32" height="32" rx="9" fill="#E01E5A" />
-      <path d="M8 11h10M8 16h7M8 21h5" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" />
-      <path d="M21 14l4 3-4 3" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
 
 // ─── Pain point item ──────────────────────────────────────────────────────────
 function PainItem({ text }: { text: string }) {
@@ -232,12 +222,42 @@ function SectionHeading({ eyebrow, title, sub }: { eyebrow: string; title: strin
 export default function LandingPage() {
   const router = useRouter();
   const [navScrolled, setNavScrolled] = useState(false);
+  const [logoTheme, setLogoTheme] = useState<'light' | 'dark'>('dark');
   const howRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const handler = () => setNavScrolled(window.scrollY > 20);
     window.addEventListener('scroll', handler);
-    return () => window.removeEventListener('scroll', handler);
+
+    const getTheme = () => {
+      const saved = document.documentElement.getAttribute('data-theme');
+      if (saved === 'light' || saved === 'dark') {
+        setLogoTheme(saved);
+      } else {
+        setLogoTheme(
+          window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        );
+      }
+    };
+    getTheme();
+    const observer = new MutationObserver(getTheme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+    // Listen for system theme changes if no override is set
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleSystemChange = () => {
+      const saved = localStorage.getItem('trexaflow_theme');
+      if (!saved || (saved !== 'light' && saved !== 'dark')) {
+        document.documentElement.setAttribute('data-theme', mediaQuery.matches ? 'dark' : 'light');
+      }
+    };
+    mediaQuery.addEventListener('change', handleSystemChange);
+
+    return () => {
+      window.removeEventListener('scroll', handler);
+      observer.disconnect();
+      mediaQuery.removeEventListener('change', handleSystemChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -253,6 +273,13 @@ export default function LandingPage() {
       else router.push('/onboarding');
     });
   }, [router]);
+
+  const toggleTheme = () => {
+    const current = document.documentElement.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('trexaflow_theme', next);
+  };
 
   const featureSections = [
     {
@@ -310,10 +337,35 @@ export default function LandingPage() {
       }}>
         <div style={{ maxWidth: 1120, width: '100%', margin: '0 auto', padding: '0 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Logo size={30} />
-            <span style={{ fontWeight: 800, fontSize: '1.05rem', letterSpacing: '-0.02em' }}>TrexaFlow</span>
+            <img
+              src={logoTheme === 'light' ? '/LogoStandarddarktransp.png' : '/LogoStandardlighttransp.png'}
+              alt="TrexaFlow"
+              style={{ height: 28, width: 'auto', objectFit: 'contain', userSelect: 'none' }}
+            />
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {/* Theme Toggle */}
+            <button
+              onClick={toggleTheme}
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                width: 34, height: 34, borderRadius: 8,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: 'var(--text-secondary)', transition: 'background 0.2s, color 0.2s',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
+                e.currentTarget.style.color = 'var(--text-primary)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = 'var(--text-secondary)';
+              }}
+              title="Toggle theme"
+            >
+              {logoTheme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+
             <button
               onClick={() => router.push('/auth')}
               style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.875rem', fontWeight: 500, cursor: 'pointer', padding: '7px 16px', borderRadius: 8, transition: 'color 0.15s' }}
@@ -338,6 +390,7 @@ export default function LandingPage() {
       <section style={{ paddingTop: 140, paddingBottom: 110, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
         <div style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)', width: 720, height: 520, background: 'radial-gradient(ellipse at center, rgba(224,30,90,0.11) 0%, transparent 68%)', pointerEvents: 'none' }} />
         <div style={{ position: 'relative', maxWidth: 860, margin: '0 auto', padding: '0 24px' }}>
+          {/* Pill badge */}
           <div style={{
             display: 'inline-flex', alignItems: 'center', gap: 7, padding: '5px 16px',
             borderRadius: 999, marginBottom: 28,
@@ -348,12 +401,13 @@ export default function LandingPage() {
             Built for teams that get things done
           </div>
 
-          <div style={{
-            fontSize: 'clamp(2rem, 4vw, 2.8rem)', fontWeight: 900,
-            letterSpacing: '-0.03em', marginBottom: 10, lineHeight: 1,
-            color: '#E01E5A',
-          }}>
-            TrexaFlow
+          {/* Logo instead of text */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
+            <img
+              src={logoTheme === 'light' ? '/LogoStandarddarktransp.png' : '/LogoStandardlighttransp.png'}
+              alt="TrexaFlow"
+              style={{ height: 64, width: 'auto', objectFit: 'contain', userSelect: 'none' }}
+            />
           </div>
 
           <h1 style={{
@@ -725,8 +779,11 @@ export default function LandingPage() {
       <footer style={{ borderTop: '1px solid var(--border-color)', padding: '28px 28px' }}>
         <div style={{ maxWidth: 1120, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Logo size={24} />
-            <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>TrexaFlow</span>
+            <img
+              src={logoTheme === 'light' ? '/LogoStandarddarktransp.png' : '/LogoStandardlighttransp.png'}
+              alt="TrexaFlow"
+              style={{ height: 22, width: 'auto', objectFit: 'contain', userSelect: 'none' }}
+            />
           </div>
           <span style={{ fontSize: '0.78rem', color: 'var(--text-faint)' }}>© 2026 TrexaFlow. All rights reserved.</span>
         </div>

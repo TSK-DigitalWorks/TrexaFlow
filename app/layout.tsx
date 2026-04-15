@@ -14,7 +14,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           (function() {
             try {
               var saved = localStorage.getItem('trexaflow_theme');
-              var theme = (saved === 'dark' || saved === 'light') ? saved : 'light';
+              var theme = saved;
+              if (!theme || (theme !== 'dark' && theme !== 'light')) {
+                // If no saved theme, detect system preference
+                theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+              }
               document.documentElement.setAttribute('data-theme', theme);
             } catch(e) {
               document.documentElement.setAttribute('data-theme', 'light');
