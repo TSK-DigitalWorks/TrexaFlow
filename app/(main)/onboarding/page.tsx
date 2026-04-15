@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { MessageSquare, User, Briefcase, Upload, X, ArrowRight, Loader2, Plus, LogIn } from "lucide-react";
+import { User, Briefcase, Upload, X, ArrowRight, Loader2, Plus, LogIn } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useRequireAuth } from "@/lib/useAuth";
 
@@ -18,6 +18,24 @@ export default function OnboardingPage() {
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState("");
+  const [logoTheme, setLogoTheme] = useState<'light' | 'dark'>('light');
+
+  // Handle logo theme sync
+  useEffect(() => {
+    const html = document.documentElement;
+    const updateLogo = () => {
+      const current = html.getAttribute('data-theme') as 'light' | 'dark' | null;
+      if (current) setLogoTheme(current);
+      else {
+        // Fallback to media query if no data-theme
+        setLogoTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      }
+    };
+    updateLogo();
+    const obs = new MutationObserver(updateLogo);
+    obs.observe(html, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => obs.disconnect();
+  }, []);
 
   useEffect(() => {
     checkAndRedirect();
@@ -298,10 +316,11 @@ export default function OnboardingPage() {
 
       {/* Logo */}
       <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "40px" }}>
-        <div style={{ width: 32, height: 32, borderRadius: 9, backgroundColor: "var(--accent)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <MessageSquare size={16} color="var(--accent-foreground)" />
-        </div>
-        <span style={{ fontWeight: 700, fontSize: "1.1rem" }}>TrexaFlow</span>
+        <img
+          src={logoTheme === "light" ? "/LogoStandarddarktransp.png" : "/LogoStandardlighttransp.png"}
+          alt="TrexaFlow"
+          style={{ height: 32, width: "auto", objectFit: "contain", userSelect: "none" }}
+        />
       </div>
 
       {/* Step indicator */}
