@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  Lock, Eye, EyeOff, ShieldCheck, Loader2, ArrowLeft, ArrowRight 
+import {
+  Lock, Eye, EyeOff, ShieldCheck, Loader2, ArrowLeft, ArrowRight
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 
@@ -179,7 +179,7 @@ export default function UpdatePasswordPage() {
             {/* Password match feedback */}
             {confirmPassword && (
               <p style={{ fontSize: '0.78rem', marginTop: 6, color: password === confirmPassword ? 'var(--success)' : 'var(--error)' }}>
-                {password === confirmPassword ? '✓ Passwords match' : '✗ Passwords do not match'}
+                {password === confirmPassword ? '✓ Passwords match' : 'X Passwords do not match'}
               </p>
             )}
           </div>
