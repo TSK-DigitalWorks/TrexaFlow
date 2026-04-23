@@ -9,6 +9,7 @@ import {
   Loader2, MoreHorizontal, Pin, User, Copy, Sun, Moon,
   Monitor, Pencil, Trash2, Upload, MailOpen, Smile, CheckSquare, Calendar,
   LayoutDashboard, Milestone, CheckSquare2, ClipboardList, Flag, UserPlus, RefreshCcw, CheckCircle2, ExternalLink, Shield,
+  Search, Briefcase, ArrowRight,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useRequireAuth } from "@/lib/useAuth";
@@ -95,7 +96,10 @@ type Project = {
   is_private: boolean;
   created_at: string;
   updated_at?: string | null;
+  member_count?: number;
 };
+
+type ProjectTab = 'overview' | 'chat';
 
 type ProjectMember = {
   id: string;
@@ -165,7 +169,7 @@ type ProjectTask = {
 };
 
 type ThemeMode = "system" | "dark" | "light";
-type View = "channel" | "dm" | "project";
+type View = "channel" | "dm" | "allprojects" | "project";
 
 const cleanPastedHtml = (node: HTMLElement): string => {
   const processNode = (n: Node): string => {
@@ -967,24 +971,40 @@ function WorkspacePage() {
     setNonProjectMembers(members.filter(m => !memberIds.includes(m.user_id)));
   };
 
-  // Open a project (switch to project view)
-  const openProject = async (project: Project, tab: 'overview' | 'chat' = 'overview') => {
-    // Clean up previous project subscriptions
-    if (projectSubRef.current) {
-      supabase.removeChannel(projectSubRef.current);
-      projectSubRef.current = null;
-    }
-    if (projectTaskSubRef.current) {
-      supabase.removeChannel(projectTaskSubRef.current);
-      projectTaskSubRef.current = null;
+  // Recently accessed project IDs (max 10), persisted to localStorage
+  const [recentProjectIds, setRecentProjectIds] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      return JSON.parse(localStorage.getItem('trexaflow-recent-projects') || '[]');
+    } catch { return []; }
+  });
+
+  // All Projects view state
+  const [allProjectsSearch, setAllProjectsSearch] = useState('');
+  const [allProjectsPage, setAllProjectsPage] = useState(1);
+  const [allProjectsTab, setAllProjectsTab] = useState<'recent' | 'all'>('recent');
+  const PROJECTS_PER_PAGE = 10;
+
+  const openProject = async (project: Project, tab: ProjectTab = 'overview') => {
+    if (activeProject && activeProject.id === project.id && view === 'project') {
+      switchProjectTab(tab);
+      return;
     }
 
     setActiveProject(project);
-    setView('project' as any);
+    setView('project');
     setActiveChannel(null);
     setActiveDmUserId(null);
     setActiveDmUser(null);
     switchProjectTab(tab);
+    
+    // Update recent projects list
+    setRecentProjectIds(prev => {
+      const next = [project.id, ...prev.filter(id => id !== project.id)].slice(0, 10);
+      localStorage.setItem('trexaflow-recent-projects', JSON.stringify(next));
+      return next;
+    });
+
     const url = `/workspace/${workspaceId}?project=${project.id}`;
     router.replace(url, { scroll: false });
     localStorage.setItem(`trexaflow_last_${workspaceId}`, url);
@@ -4201,6 +4221,34 @@ function WorkspacePage() {
               {/* Projects list — dynamic */}
               {sidebarProjectsOpen && (
                 <div style={{ padding: '2px 10px' }}>
+                  {/* All Projects Entry */}
+                  <button
+                    onClick={() => {
+                      setView('allprojects');
+                      setAllProjectsTab('recent');
+                      setActiveProject(null);
+                      setActiveChannel(null);
+                      setActiveDmUserId(null);
+                      router.replace(`/workspace/${workspaceId}?view=allprojects`, { scroll: false });
+                    }}
+                    style={{
+                      width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "5px 12px", border: "none",
+                      background: view === 'allprojects' ? "var(--bg-active)" : "transparent",
+                      color: view === 'allprojects' ? "var(--text-primary)" : "var(--text-muted)",
+                      textAlign: "left", cursor: "pointer", borderRadius: 6, fontSize: "0.85rem", fontWeight: 600, transition: "all 0.1s",
+                      marginBottom: 4
+                    }}
+                    onMouseEnter={e => { if (view !== 'allprojects') e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={e => { if (view !== 'allprojects') e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 14 }}>
+                      <LayoutDashboard size={14} />
+                    </div>
+                    <span>All Projects</span>
+                  </button>
+
+                  <div style={{ height: 1, backgroundColor: 'var(--border-color)', margin: '4px 8px', opacity: 0.5 }} />
+
                   {loadingProjects ? (
                     <div style={{ padding: '8px', display: 'flex', alignItems: 'center', gap: 8 }}>
                       <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid var(--border-strong)', borderTopColor: '#E01E5A', animation: 'spin 0.7s linear infinite' }} />
@@ -4225,7 +4273,48 @@ function WorkspacePage() {
                       </span>
                     </div>
                   ) : (
-                    projects.map(proj => {
+                    // Show recent projects (max 10) in sidebar
+                    projects
+                      .filter(p => recentProjectIds.includes(p.id))
+                      .sort((a, b) => recentProjectIds.indexOf(a.id) - recentProjectIds.indexOf(b.id))
+                      .map(proj => {
+                        const isActive = view === 'project' && activeProject?.id === proj.id;
+                        return (
+                          <button key={proj.id} onClick={() => openProject(proj)}
+                            style={{
+                              width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "5px 12px", border: "none",
+                              background: isActive ? "var(--bg-active)" : "transparent",
+                              color: isActive ? "var(--text-primary)" : "var(--text-muted)",
+                              textAlign: "left", cursor: "pointer", borderRadius: 6, fontSize: "0.85rem", fontWeight: 500, transition: "all 0.1s"
+                            }}
+                            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                          >
+                            <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: proj.color, flexShrink: 0 }} />
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{proj.name}</span>
+                            {(projectChatUnread[proj.id] ?? 0) > 0 && (
+                              <span style={{
+                                backgroundColor: '#E01E5A',
+                                color: '#fff',
+                                fontSize: '0.65rem',
+                                fontWeight: 700,
+                                borderRadius: 999,
+                                padding: '1px 5px',
+                                minWidth: 16,
+                                textAlign: 'center',
+                                flexShrink: 0,
+                                marginLeft: 'auto',
+                              }}>
+                                {projectChatUnread[proj.id]}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })
+                  )}
+                  {/* If no recent projects but some projects exist, show first few */}
+                  {projects.length > 0 && projects.filter(p => recentProjectIds.includes(p.id)).length === 0 && (
+                    projects.slice(0, 5).map(proj => {
                       const isActive = view === 'project' && activeProject?.id === proj.id;
                       return (
                         <button key={proj.id} onClick={() => openProject(proj)}
@@ -4240,22 +4329,6 @@ function WorkspacePage() {
                         >
                           <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: proj.color, flexShrink: 0 }} />
                           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{proj.name}</span>
-                          {(projectChatUnread[proj.id] ?? 0) > 0 && (
-                            <span style={{
-                              backgroundColor: '#E01E5A',
-                              color: '#fff',
-                              fontSize: '0.65rem',
-                              fontWeight: 700,
-                              borderRadius: 999,
-                              padding: '1px 5px',
-                              minWidth: 16,
-                              textAlign: 'center',
-                              flexShrink: 0,
-                              marginLeft: 'auto',
-                            }}>
-                              {projectChatUnread[proj.id]}
-                            </span>
-                          )}
                         </button>
                       );
                     })
@@ -5203,6 +5276,199 @@ function WorkspacePage() {
               </div>
             </>
           )}
+
+          {/* ══════════════════════════════════════════════════════
+            ALL PROJECTS VIEW
+        ══════════════════════════════════════════════════════ */}
+          {view === 'allprojects' && (
+  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+    {/* Header */}
+    <div style={{ height: 56, borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: 12, padding: '0 20px', flexShrink: 0 }}>
+      <LayoutDashboard size={18} style={{ color: '#E01E5A' }} />
+      <span style={{ fontWeight: 700, fontSize: '1rem', color: 'var(--text-primary)' }}>Projects</span>
+      <div style={{ flex: 1 }} />
+      {isAdmin && (
+        <button onClick={() => setShowCreateProject(true)}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', backgroundColor: '#E01E5A', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}>
+          <Plus size={15} /> New Project
+        </button>
+      )}
+    </div>
+
+    {/* Tabs — same style as Overview/Discussions */}
+    <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border-color)', padding: '0 20px', flexShrink: 0 }}>
+      {(['recent', 'all'] as const).map(tab => (
+        <button key={tab}
+          onClick={() => { setAllProjectsTab(tab); setAllProjectsPage(1); setAllProjectsSearch(''); }}
+          style={{
+            padding: '10px 16px', background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: '0.85rem', fontWeight: allProjectsTab === tab ? 600 : 400,
+            color: allProjectsTab === tab ? 'var(--text-primary)' : 'var(--text-muted)',
+            borderBottom: allProjectsTab === tab ? '2px solid #E01E5A' : '2px solid transparent',
+            marginBottom: -1, transition: 'all 0.15s',
+          }}>
+          {tab === 'recent' ? '🕐 Recent' : `All Projects (${projects.length})`}
+        </button>
+      ))}
+    </div>
+
+    {/* Search bar — only on All tab */}
+    {allProjectsTab === 'all' && (
+      <div style={{ padding: '12px 20px', borderBottom: '1px solid var(--border-color)', flexShrink: 0 }}>
+        <div style={{ position: 'relative', maxWidth: 360 }}>
+          <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+          <input type="text" placeholder="Search by project name or description..."
+            value={allProjectsSearch}
+            onChange={e => { setAllProjectsSearch(e.target.value); setAllProjectsPage(1); }}
+            style={{ width: '100%', padding: '8px 10px 8px 32px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: '0.85rem', outline: 'none' }}
+          />
+          {allProjectsSearch && (
+            <button onClick={() => setAllProjectsSearch('')}
+              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex' }}>
+              <X size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+    )}
+
+    {/* List area */}
+    <div style={{ flex: 1, overflowY: 'auto', padding: '8px 20px 20px' }}>
+      {(() => {
+        let displayProjects: typeof projects;
+
+        if (allProjectsTab === 'recent') {
+          const recentProjs = recentProjectIds
+            .map(id => projects.find(p => p.id === id))
+            .filter(Boolean) as typeof projects;
+          // Fallback: if no history yet, show last 10 by creation date
+          displayProjects = recentProjs.length > 0 ? recentProjs : [...projects].slice(0, 10);
+        } else {
+          displayProjects = projects.filter(p =>
+            p.name.toLowerCase().includes(allProjectsSearch.toLowerCase()) ||
+            (p.description ?? '').toLowerCase().includes(allProjectsSearch.toLowerCase())
+          );
+        }
+
+        const totalPages = Math.ceil(displayProjects.length / PROJECTS_PER_PAGE);
+        const paginated = displayProjects.slice(
+          (allProjectsPage - 1) * PROJECTS_PER_PAGE,
+          allProjectsPage * PROJECTS_PER_PAGE
+        );
+
+        if (displayProjects.length === 0) {
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '55%', gap: 10, color: 'var(--text-muted)' }}>
+              <LayoutDashboard size={36} style={{ opacity: 0.18 }} />
+              <span style={{ fontSize: '0.88rem' }}>
+                {allProjectsTab === 'recent'
+                  ? 'No recently accessed projects yet. Open a project to track it here.'
+                  : allProjectsSearch ? `No projects matching "${allProjectsSearch}"` : 'No projects yet'}
+              </span>
+              {isAdmin && allProjectsTab === 'all' && !allProjectsSearch && (
+                <button onClick={() => setShowCreateProject(true)}
+                  style={{ marginTop: 4, padding: '7px 16px', backgroundColor: '#E01E5A', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: '0.84rem' }}>
+                  Create first project
+                </button>
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <>
+            {/* Column header */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px 100px 80px 110px', gap: 8, padding: '8px 12px', marginBottom: 2, borderBottom: '1px solid var(--border-color)' }}>
+              {['Project', 'Tasks', 'Chat', 'Status', 'Created'].map(h => (
+                <span key={h} style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>{h}</span>
+              ))}
+            </div>
+
+            {/* Rows */}
+            {paginated.map(proj => {
+              const openTasks = projectTasks.filter(t => t.project_id === proj.id && t.status !== 'complete').length;
+              const unread = projectChatUnread[proj.id] ?? 0;
+              const isActive = activeProject?.id === proj.id;
+              return (
+                <button key={proj.id} onClick={() => openProject(proj)}
+                  style={{
+                    width: '100%', display: 'grid', gridTemplateColumns: '1fr 90px 100px 80px 110px',
+                    gap: 8, padding: '11px 12px', border: 'none', borderRadius: 8,
+                    background: isActive ? 'color-mix(in srgb, #E01E5A 8%, var(--bg-secondary))' : 'transparent',
+                    cursor: 'pointer', textAlign: 'left', alignItems: 'center',
+                    borderLeft: isActive ? '3px solid #E01E5A' : '3px solid transparent',
+                    transition: 'background 0.12s',
+                    marginBottom: 2,
+                  }}
+                  onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                  onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                >
+                  {/* Name col */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                    <div style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: proj.color, flexShrink: 0 }} />
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 5 }}>
+                        {proj.name}
+                        {proj.is_private && <Lock size={11} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
+                      </div>
+                      {proj.description && (
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320, marginTop: 1 }}>
+                          {proj.description}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Tasks col */}
+                  <div style={{ fontSize: '0.8rem', color: openTasks > 0 ? 'var(--text-primary)' : 'var(--text-faint)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <CheckSquare2 size={13} style={{ color: 'var(--text-muted)' }} />
+                    {openTasks > 0 ? `${openTasks} open` : '—'}
+                  </div>
+
+                  {/* Chat col */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    {unread > 0
+                      ? <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.67rem', fontWeight: 700, borderRadius: 999, padding: '1px 6px' }}>{unread} new</span>
+                      : <span style={{ fontSize: '0.78rem', color: 'var(--text-faint)' }}>—</span>
+                    }
+                  </div>
+
+                  {/* Status / visibility col */}
+                  <div>
+                    <span style={{ fontSize: '0.72rem', padding: '2px 7px', borderRadius: 999, backgroundColor: proj.is_private ? 'rgba(224,30,90,0.1)' : 'rgba(67,187,34,0.1)', color: proj.is_private ? '#E01E5A' : '#37a82b', fontWeight: 600 }}>
+                      {proj.is_private ? 'Private' : 'Open'}
+                    </span>
+                  </div>
+
+                  {/* Date col */}
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'right' }}>
+                    {new Date(proj.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })}
+                  </div>
+                </button>
+              );
+            })}
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 20 }}>
+                <button onClick={() => setAllProjectsPage(p => Math.max(1, p - 1))} disabled={allProjectsPage === 1}
+                  style={{ padding: '5px 14px', borderRadius: 7, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', cursor: allProjectsPage === 1 ? 'not-allowed' : 'pointer', opacity: allProjectsPage === 1 ? 0.4 : 1, fontSize: '0.82rem' }}>
+                  ← Prev
+                </button>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Page {allProjectsPage} of {totalPages}</span>
+                <button onClick={() => setAllProjectsPage(p => Math.min(totalPages, p + 1))} disabled={allProjectsPage === totalPages}
+                  style={{ padding: '5px 14px', borderRadius: 7, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', cursor: allProjectsPage === totalPages ? 'not-allowed' : 'pointer', opacity: allProjectsPage === totalPages ? 0.4 : 1, fontSize: '0.82rem' }}>
+                  Next →
+                </button>
+              </div>
+            )}
+          </>
+        );
+      })()}
+    </div>
+  </div>
+)}
 
           {/* PROJECT VIEW */}
           {(view as string) === 'project' && activeProject && (
