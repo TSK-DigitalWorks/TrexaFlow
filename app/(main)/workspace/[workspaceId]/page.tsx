@@ -362,6 +362,30 @@ function WorkspacePage() {
 
   const initialChannelId = searchParams.get("channel");
 
+  // ── Mobile detection ──────────────────────────────────────────
+  const [isMobile, setIsMobile] = useState(false);
+  const [showMobileWarning, setShowMobileWarning] = useState(false);
+
+  useEffect(() => {
+    const check = () => {
+      const mobile = window.innerWidth < 1024;
+      setIsMobile(mobile);
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
+  // Show modal once per session on mobile
+  useEffect(() => {
+    if (isMobile) {
+      const dismissed = sessionStorage.getItem('mobileWarningDismissed');
+      if (!dismissed) {
+        setShowMobileWarning(true);
+      }
+    }
+  }, [isMobile]);
+
   // ── View mode ──
   const [view, setView] = useState<View>("channel");
   const [activeDmUserId, setActiveDmUserId] = useState<string | null>(null);
@@ -8140,6 +8164,147 @@ function WorkspacePage() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Mobile Warning Modal ─────────────────────────────────── */}
+      {showMobileWarning && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 99999,
+            backgroundColor: 'rgba(0,0,0,0.7)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+            padding: '0 0 0 0',
+            animation: 'fadeIn 0.2s ease',
+          }}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 480,
+              backgroundColor: 'var(--bg-secondary)',
+              borderTop: '1px solid var(--border-color)',
+              borderRadius: '20px 20px 0 0',
+              padding: '28px 24px 36px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 0,
+              animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+              boxShadow: '0 -16px 48px rgba(0,0,0,0.4)',
+            }}
+          >
+            {/* Drag handle */}
+            <div style={{
+              width: 36, height: 4, borderRadius: 999,
+              backgroundColor: 'var(--border-strong)',
+              margin: '0 auto 24px',
+              flexShrink: 0,
+            }} />
+
+            {/* Icon */}
+            <div style={{
+              width: 52, height: 52, borderRadius: 14,
+              backgroundColor: 'rgba(224,30,90,0.10)',
+              border: '1px solid rgba(224,30,90,0.2)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              marginBottom: 18,
+              flexShrink: 0,
+            }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+                stroke="#E01E5A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" />
+                <path d="M8 21h8M12 17v4" />
+              </svg>
+            </div>
+
+            {/* Heading */}
+            <div style={{
+              fontSize: '1.15rem', fontWeight: 800,
+              color: 'var(--text-primary)',
+              letterSpacing: '-0.02em',
+              marginBottom: 10, lineHeight: 1.25,
+            }}>
+              Best on a bigger screen
+            </div>
+
+            {/* Body */}
+            <p style={{
+              fontSize: '0.875rem', color: 'var(--text-secondary)',
+              lineHeight: 1.65, marginBottom: 24, margin: '0 0 24px',
+            }}>
+              TrexaFlow's workspace is designed for desktop and wider screens —
+              with a full sidebar, multi-column layouts, and a rich chat and task
+              experience. On mobile, some things may feel cramped or cut off.
+            </p>
+
+            {/* Tip row */}
+            <div style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10,
+              backgroundColor: 'rgba(224,30,90,0.06)',
+              border: '1px solid rgba(224,30,90,0.15)',
+              borderRadius: 10, padding: '11px 14px',
+              marginBottom: 24,
+            }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                stroke="#E01E5A" strokeWidth="2.2" strokeLinecap="round"
+                strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                For the best experience, open TrexaFlow on a{' '}
+                <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                  laptop or desktop browser
+                </span>.
+              </span>
+            </div>
+
+            {/* Buttons */}
+            <button
+              onClick={() => {
+                sessionStorage.setItem('mobileWarningDismissed', 'true');
+                setShowMobileWarning(false);
+              }}
+              style={{
+                width: '100%', padding: '13px',
+                backgroundColor: '#E01E5A', color: '#fff',
+                border: 'none', borderRadius: 11,
+                fontSize: '0.9rem', fontWeight: 700,
+                cursor: 'pointer', marginBottom: 10,
+                transition: 'background 0.15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#c8174f')}
+              onMouseLeave={e => (e.currentTarget.style.backgroundColor = '#E01E5A')}
+            >
+              Continue anyway
+            </button>
+
+            <button
+              onClick={() => window.history.back()}
+              style={{
+                width: '100%', padding: '12px',
+                backgroundColor: 'transparent',
+                color: 'var(--text-secondary)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 11,
+                fontSize: '0.875rem', fontWeight: 500,
+                cursor: 'pointer',
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.color = 'var(--text-primary)';
+                e.currentTarget.style.borderColor = 'var(--border-strong)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.color = 'var(--text-secondary)';
+                e.currentTarget.style.borderColor = 'var(--border-color)';
+              }}
+            >
+              Go back
+            </button>
           </div>
         </div>
       )}
