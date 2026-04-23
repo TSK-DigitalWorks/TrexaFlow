@@ -223,7 +223,15 @@ export default function LandingPage() {
   const router = useRouter();
   const [navScrolled, setNavScrolled] = useState(false);
   const [logoTheme, setLogoTheme] = useState<'light' | 'dark'>('dark');
+  const [isMobile, setIsMobile] = useState(false);
   const howRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth < 768);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   useEffect(() => {
     const handler = () => setNavScrolled(window.scrollY > 20);
@@ -343,7 +351,7 @@ export default function LandingPage() {
               style={{ height: 28, width: 'auto', objectFit: 'contain', userSelect: 'none' }}
             />
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: isMobile ? 4 : 8, alignItems: 'center' }}>
             {/* Theme Toggle */}
             <button
               onClick={toggleTheme}
@@ -366,21 +374,30 @@ export default function LandingPage() {
               {logoTheme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
             </button>
 
+            {!isMobile && (
+              <button
+                onClick={() => router.push('/auth')}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.875rem', fontWeight: 500, cursor: 'pointer', padding: '7px 16px', borderRadius: 8, transition: 'color 0.15s' }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-secondary)')}
+              >
+                Sign in
+              </button>
+            )}
+            
             <button
               onClick={() => router.push('/auth')}
-              style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.875rem', fontWeight: 500, cursor: 'pointer', padding: '7px 16px', borderRadius: 8, transition: 'color 0.15s' }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-secondary)')}
-            >
-              Sign in
-            </button>
-            <button
-              onClick={() => router.push('/auth')}
-              style={{ backgroundColor: '#E01E5A', color: '#fff', border: 'none', fontSize: '0.875rem', fontWeight: 600, cursor: 'pointer', padding: '7px 18px', borderRadius: 8, transition: 'background 0.15s', display: 'flex', alignItems: 'center', gap: 6 }}
+              style={{ 
+                backgroundColor: '#E01E5A', color: '#fff', border: 'none', 
+                fontSize: '0.875rem', fontWeight: 600, cursor: 'pointer', 
+                padding: isMobile ? '7px 14px' : '7px 18px', 
+                borderRadius: 8, transition: 'background 0.15s', 
+                display: 'flex', alignItems: 'center', gap: 6 
+              }}
               onMouseEnter={e => ((e.currentTarget as HTMLElement).style.backgroundColor = '#c8174f')}
               onMouseLeave={e => ((e.currentTarget as HTMLElement).style.backgroundColor = '#E01E5A')}
             >
-              Get Started <ArrowRight size={14} />
+              {isMobile ? 'Join' : 'Get Started'} {!isMobile && <ArrowRight size={14} />}
             </button>
           </div>
         </div>
