@@ -368,7 +368,7 @@ function WorkspacePage() {
 
   useEffect(() => {
     const check = () => {
-      const mobile = window.innerWidth < 1024;
+      const mobile = window.innerWidth < 640;
       setIsMobile(mobile);
     };
     check();
@@ -376,13 +376,10 @@ function WorkspacePage() {
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  // Show modal once per session on mobile
+  // Show modal on each reload for mobile
   useEffect(() => {
     if (isMobile) {
-      const dismissed = sessionStorage.getItem('mobileWarningDismissed');
-      if (!dismissed) {
-        setShowMobileWarning(true);
-      }
+      setShowMobileWarning(true);
     }
   }, [isMobile]);
 
@@ -8265,7 +8262,6 @@ function WorkspacePage() {
             {/* Buttons */}
             <button
               onClick={() => {
-                sessionStorage.setItem('mobileWarningDismissed', 'true');
                 setShowMobileWarning(false);
               }}
               style={{
