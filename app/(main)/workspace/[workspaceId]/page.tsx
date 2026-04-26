@@ -12,8 +12,11 @@ import {
   Search, Briefcase, ArrowRight,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { stripHtmlForPreview } from "@/utils/stripHtml";
 import { useRequireAuth } from "@/lib/useAuth";
 import { WorkspaceInfoModal } from '@/components/workspace/WorkspaceInfoModal';
+import { markChannelRead, markDMRead, markProjectChatRead, getChannelUnreadCount, getDMUnreadCount } from "@/utils/reads";
+import { trackProjectAccess, getRecentProjects, getProjectUnreadCount } from "@/utils/projectAccess";
 
 // ─── Types ───────────────────────────────────────────────
 type Profile = {
@@ -683,8 +686,8 @@ function WorkspacePage() {
 
   useEffect(() => {
     activeChannelRef.current = activeChannel;
-    if (activeChannel) markChannelAsRead(activeChannel.id);
-  }, [activeChannel]);
+    if (activeChannel && me?.id) markChannelAsRead(activeChannel.id);
+  }, [activeChannel, me?.id]);
 
   useEffect(() => {
     viewRef.current = view;
@@ -749,13 +752,7 @@ function WorkspacePage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // DM unread counts from localStorage
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("trexaflow:dm:unread") || "{}");
-      setDmUnreadCounts(stored);
-    }
-  }, []);
+
 
   // Close theme picker on outside click
   useEffect(() => {
@@ -929,6 +926,11 @@ function WorkspacePage() {
       .eq("workspace_id", workspaceId)
       .order("created_at");
     setProjects(data ?? []);
+
+    // Load recent projects from DB
+    const recent = await getRecentProjects(uid, workspaceId, 10);
+    setRecentProjectIds(recent.map((p: any) => p.id));
+
     setLoadingProjects(false);
   };
 
@@ -1014,13 +1016,8 @@ function WorkspacePage() {
     setNonProjectMembers(members.filter(m => !memberIds.includes(m.user_id)));
   };
 
-  // Recently accessed project IDs (max 10), persisted to localStorage
-  const [recentProjectIds, setRecentProjectIds] = useState<string[]>(() => {
-    if (typeof window === 'undefined') return [];
-    try {
-      return JSON.parse(localStorage.getItem('trexaflow-recent-projects') || '[]');
-    } catch { return []; }
-  });
+  // Recently accessed project IDs (max 10), fetched from DB
+  const [recentProjectIds, setRecentProjectIds] = useState<string[]>([]);
 
   // All Projects view state
   const [allProjectsSearch, setAllProjectsSearch] = useState('');
@@ -1044,9 +1041,11 @@ function WorkspacePage() {
     // Update recent projects list
     setRecentProjectIds(prev => {
       const next = [project.id, ...prev.filter(id => id !== project.id)].slice(0, 10);
-      localStorage.setItem('trexaflow-recent-projects', JSON.stringify(next));
       return next;
     });
+    if (me?.id) {
+      trackProjectAccess(project.id, me.id, workspaceId);
+    }
 
     const url = `/workspace/${workspaceId}?project=${project.id}`;
     router.replace(url, { scroll: false });
@@ -1411,31 +1410,10 @@ function WorkspacePage() {
 
     const projectIds = memberships.map((m: any) => m.project_id);
 
-    // Get last read timestamps for this user
-    const { data: reads } = await supabase
-      .from('project_chat_reads')
-      .select('project_id, last_read_at')
-      .eq('user_id', me.id)
-      .in('project_id', projectIds);
-
-    const readMap: Record<string, string> = {};
-    reads?.forEach((r: any) => { readMap[r.project_id] = r.last_read_at; });
-
-    // For each project, count messages newer than last_read_at
     const counts: Record<string, number> = {};
     await Promise.all(
       projectIds.map(async (pid: string) => {
-        const lastRead = readMap[pid];
-        let query = supabase
-          .from('project_messages')
-          .select('*', { count: 'exact', head: true })
-          .eq('project_id', pid)
-          .eq('is_system', false);
-        if (lastRead) {
-          query = query.gt('created_at', lastRead);
-        }
-        const { count } = await query;
-        counts[pid] = count ?? 0;
+        counts[pid] = await getProjectUnreadCount(pid, me.id);
       })
     );
     setProjectChatUnread(counts);
@@ -1749,9 +1727,20 @@ function WorkspacePage() {
     // Fetch public channels
     const { data: publicChans } = await supabase
       .from("channels")
-      .select("*")
+      .select(`
+        *,
+        messages (
+          content,
+          created_at,
+          sender_id,
+          is_system,
+          sender:users ( full_name )
+        )
+      `)
       .eq("workspace_id", workspaceId)
       .eq("is_private", false)
+      .order("created_at", { referencedTable: "messages", ascending: false })
+      .limit(1, { referencedTable: "messages" })
       .order("is_default", { ascending: false })
       .order("created_at");
 
@@ -1762,14 +1751,25 @@ function WorkspacePage() {
       .eq("user_id", currentUserId);
 
     const privateChannelIds = privateMemberships?.map(m => m.channel_id) || [];
-    let privateChans: Channel[] = [];
+    let privateChans: any[] = [];
     if (privateChannelIds.length > 0) {
       const { data } = await supabase
         .from("channels")
-        .select("*")
+        .select(`
+          *,
+          messages (
+            content,
+            created_at,
+            sender_id,
+            is_system,
+            sender:users ( full_name )
+          )
+        `)
         .eq("workspace_id", workspaceId)
         .eq("is_private", true)
         .in("id", privateChannelIds)
+        .order("created_at", { referencedTable: "messages", ascending: false })
+        .limit(1, { referencedTable: "messages" })
         .order("created_at");
       privateChans = data || [];
     }
@@ -1779,6 +1779,19 @@ function WorkspacePage() {
       ...privateChans,
     ];
     setChannels(chans);
+
+    // Populate channel last messages
+    const lastMsgs: Record<string, { senderName: string; text: string }> = {};
+    chans.forEach((ch: any) => {
+      const lastMsg = ch.messages?.[0];
+      if (lastMsg) {
+        const sender = lastMsg.sender;
+        const senderName = sender?.full_name?.split(' ')[0] ?? 'Someone';
+        const text = stripHtmlForPreview(lastMsg.content ?? '').slice(0, 50);
+        lastMsgs[ch.id] = { senderName, text };
+      }
+    });
+    setChannelLastMsg(prev => ({ ...prev, ...lastMsgs }));
     await fetchUnreadCounts(chans);
     await loadMembers();
 
@@ -2002,7 +2015,7 @@ function WorkspacePage() {
               ...prev,
               [msg.channel_id]: {
                 senderName: sender?.full_name?.split(' ')[0] ?? 'Someone',
-                text: (msg.content ?? '').replace(/<[^>]*>/g, '').slice(0, 50),
+                text: stripHtmlForPreview(msg.content ?? '').slice(0, 50),
               }
             }));
           }
@@ -2043,7 +2056,7 @@ function WorkspacePage() {
           if (msg.workspace_id !== workspaceId) return; // ✅ ignore DMs from other workspaces
 
           // Update sidebar last-message preview
-          const text = (msg.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+          const text = stripHtmlForPreview(msg.content ?? "").slice(0, 50);
           setDmLastMsg(prev => ({ ...prev, [msg.sender_id]: { senderId: msg.sender_id, text } }));
 
           // If user is already looking at this DM conversation, don't badge
@@ -2051,9 +2064,6 @@ function WorkspacePage() {
           if (msg.sender_id === activeDmUserIdRef.current) return; // already viewing
           setDmUnreadCounts(prev => {
             const updated = { ...prev, [msg.sender_id]: (prev[msg.sender_id] || 0) + 1 };
-            if (typeof window !== "undefined") {
-              localStorage.setItem("trexaflow:dm:unread", JSON.stringify(updated));
-            }
             return updated;
           });
         }
@@ -2176,12 +2186,12 @@ function WorkspacePage() {
 
     // Clear badge for this user
     setDmUnreadCounts(prev => {
-      const updated = { ...prev, [userId]: 0 };
-      if (typeof window !== "undefined") {
-        localStorage.setItem("trexaflow:dm:unread", JSON.stringify(updated));
-      }
-      return updated;
+      return { ...prev, [userId]: 0 };
     });
+
+    if (me?.id) {
+      markDMRead(me.id, userId, workspaceId);
+    }
 
     // Fetch the profile if not passed
     if (!userProfile) {
@@ -2221,11 +2231,7 @@ function WorkspacePage() {
 
     // Clear unread badge
     setDmUnreadCounts(prev => {
-      const updated = { ...prev, [otherId]: 0 };
-      if (typeof window !== "undefined") {
-        localStorage.setItem("trexaflow:dm:unread", JSON.stringify(updated));
-      }
-      return updated;
+      return { ...prev, [otherId]: 0 };
     });
   };
 
@@ -2260,9 +2266,13 @@ function WorkspacePage() {
             .maybeSingle();
 
           if (lastMsg) {
-            const text = (lastMsg.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+            const text = stripHtmlForPreview(lastMsg.content ?? "").slice(0, 50);
             setDmLastMsg(prev => ({ ...prev, [m.user_id]: { senderId: lastMsg.sender_id, text } }));
           }
+
+          // Fetch DM unread count from DB
+          const unreadCount = await getDMUnreadCount(meIdRef.current, m.user_id, workspaceId);
+          setDmUnreadCounts(prev => ({ ...prev, [m.user_id]: unreadCount }));
         }
 
         return { ...m, profile: p };
@@ -2282,7 +2292,7 @@ function WorkspacePage() {
         .maybeSingle();
 
       if (lastNote) {
-        const text = (lastNote.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+        const text = stripHtmlForPreview(lastNote.content ?? "").slice(0, 50);
         setDmLastMsg(prev => ({ ...prev, [meIdRef.current!]: { senderId: lastNote.sender_id, text } }));
       }
     }
@@ -2493,7 +2503,7 @@ function WorkspacePage() {
 
       // Update sidebar last-message preview
       const targetId = sent.receiver_id;
-      const text = (sent.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+      const text = stripHtmlForPreview(sent.content ?? "").slice(0, 50);
       setDmLastMsg(prev => ({ ...prev, [targetId]: { senderId: sent.sender_id, text } }));
     }
 
@@ -2518,11 +2528,7 @@ function WorkspacePage() {
     setDmUnreadFromMessageId(null);
     setDmUnreadCount(0);
     setDmUnreadCounts(prev => {
-      const updated = { ...prev, [activeDmUserId]: 0 };
-      if (typeof window !== "undefined") {
-        localStorage.setItem("trexaflow:dm:unread", JSON.stringify(updated));
-      }
-      return updated;
+      return { ...prev, [activeDmUserId]: 0 };
     });
   };
 
@@ -2585,10 +2591,8 @@ function WorkspacePage() {
     setUnreadFromMessageId(msg.id);
     const msgsAfter = messages.filter(m => m.created_at >= msg.created_at);
     setUnreadCounts(prev => ({ ...prev, [activeChannel.id]: msgsAfter.length }));
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("trexaflow_lastread") || "{}");
-      stored[activeChannel.id] = justBefore;
-      localStorage.setItem("trexaflow_lastread", JSON.stringify(stored));
+    if (me?.id) {
+      supabase.from('channel_reads').upsert({ channel_id: activeChannel.id, user_id: me.id, last_read_at: justBefore }).then();
     }
   };
 
@@ -2604,58 +2608,19 @@ function WorkspacePage() {
     setUnreadCounts(prev => ({ ...prev, [channelId]: 0 }));
     setMentionCounts(prev => ({ ...prev, [channelId]: 0 }));
     setUnreadFromMessageId(null);
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("trexaflow_lastread") || "{}");
-      stored[channelId] = now;
-      localStorage.setItem("trexaflow_lastread", JSON.stringify(stored));
+    if (me?.id) {
+      markChannelRead(channelId, me.id);
     }
   };
 
   // ─── Fetch unread counts for all channels ─────────────────
-  const loadLastReadMap = (): Record<string, string> => {
-    if (typeof window === "undefined") return {};
-    return JSON.parse(localStorage.getItem("trexaflow_lastread") || "{}");
-  };
-
   const fetchUnreadCounts = async (channelList: Channel[]) => {
-    const stored = loadLastReadMap();
-    setLastReadMap(stored);
+    const currentUserId = meIdRef.current;
+    if (!currentUserId) return;
     const counts: Record<string, number> = {};
     await Promise.all(
       channelList.map(async ch => {
-        const lastRead = stored[ch.id];
-        if (!lastRead) {
-          const { count } = await supabase
-            .from("messages")
-            .select("id", { count: "exact", head: true })
-            .eq("channel_id", ch.id)
-            .eq("is_system", false);
-          counts[ch.id] = count || 0;
-        } else {
-          const { count } = await supabase
-            .from("messages")
-            .select("id", { count: "exact", head: true })
-            .eq("channel_id", ch.id)
-            .eq("is_system", false)
-            .gt("created_at", lastRead);
-          counts[ch.id] = count || 0;
-        }
-
-        // last message preview
-        const { data: lastMsgRow } = await supabase
-          .from('messages')
-          .select('content, sender_id, sender:users(full_name)')
-          .eq('channel_id', ch.id)
-          .eq('is_system', false)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .single();
-        if (lastMsgRow) {
-          const sender = (lastMsgRow as any).sender;
-          const senderName = sender?.full_name?.split(' ')[0] ?? 'Someone';
-          const text = (lastMsgRow.content ?? '').replace(/<[^>]*>/g, '').slice(0, 50);
-          setChannelLastMsg(prev => ({ ...prev, [ch.id]: { senderName, text } }));
-        }
+        counts[ch.id] = await getChannelUnreadCount(ch.id, currentUserId);
       })
     );
     setUnreadCounts(counts);
@@ -2703,13 +2668,14 @@ function WorkspacePage() {
     setDmUnreadFromMessageId(msg.id);
     const count = dmMessages.filter(m => m.created_at >= msg.created_at).length;
     setDmUnreadCount(count);
-    if (activeDmUserId) {
+    if (activeDmUserId && me?.id) {
       setDmUnreadCounts(prev => ({ ...prev, [activeDmUserId]: count }));
-      if (typeof window !== "undefined") {
-        const stored = JSON.parse(localStorage.getItem("trexaflow_dm_lastread") || "{}");
-        stored[activeDmUserId] = justBefore;
-        localStorage.setItem("trexaflow_dm_lastread", JSON.stringify(stored));
-      }
+      supabase.from('dm_reads').upsert({
+        user_id: me.id,
+        other_user_id: activeDmUserId,
+        workspace_id: workspaceId,
+        last_read_at: justBefore
+      }).then();
     }
   };
 
