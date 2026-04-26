@@ -475,9 +475,11 @@ function WorkspacePage() {
 
   // ── Unread / theme / misc ──
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [channelLastMsg, setChannelLastMsg] = useState<Record<string, { senderName: string; text: string }>>({});
   const [lastReadMap, setLastReadMap] = useState<Record<string, string>>({});
   const [dmUnreadCounts, setDmUnreadCounts] = useState<Record<string, number>>({});
   const [mentionCounts, setMentionCounts] = useState<Record<string, number>>({});
+  const [dmLastMsg, setDmLastMsg] = useState<Record<string, { senderId: string; text: string }>>({});
   const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [showThemePicker, setShowThemePicker] = useState(false);
@@ -635,6 +637,8 @@ function WorkspacePage() {
   // ── Toast state ──
   const [toast, setToast] = useState<{ message: string; type: 'error' | 'success' | 'info' } | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isCreatingProjectRef = useRef(false);
+  const isCreatingChannelRef = useRef(false);
 
   // ── Reply state ──
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -788,7 +792,7 @@ function WorkspacePage() {
 
   // Scroll to bottom when channel messages load
   useEffect(() => {
-    if (view !== "channel" || loading || messages.length === 0) return;
+    if (view !== "channel" || loading || messages.length === 0 || isLobby) return;
     const timer = setTimeout(() => {
       if (messagesContainerRef.current) {
         messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
@@ -950,6 +954,24 @@ function WorkspacePage() {
             if (!membership) return;
           }
           setProjects(prev => prev.find(p => p.id === proj.id) ? prev : [...prev, proj]);
+          loadProjectUnreadCounts();
+        }
+      )
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'project_messages' },
+        async (payload: any) => {
+          const msg = payload.new as any;
+          // Only badge if NOT currently viewing this project's chat
+          const isViewingThisProjectChat =
+            viewRef.current === 'project' &&
+            activeProjectRef.current?.id === msg.project_id &&
+            projectTabRef.current === 'chat';
+
+          if (!isViewingThisProjectChat && msg.sender_id !== meIdRef.current) {
+            setProjectChatUnread(prev => ({
+              ...prev,
+              [msg.project_id]: (prev[msg.project_id] ?? 0) + 1,
+            }));
+          }
         }
       )
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'projects', filter: `workspace_id=eq.${workspaceId}` },
@@ -1041,8 +1063,9 @@ function WorkspacePage() {
 
   // Create project (now with is_private + DB trigger handles member auto-add)
   const createProject = async () => {
-    if (!newProjectName.trim() || !me) return;
+    if (!newProjectName.trim() || !me || creatingProject || isCreatingProjectRef.current) return;
     setCreatingProject(true);
+    isCreatingProjectRef.current = true;
 
     const { data: proj, error } = await supabase
       .from('projects')
@@ -1060,6 +1083,7 @@ function WorkspacePage() {
     if (error) {
       showToast('Failed to create project', 'error');
       setCreatingProject(false);
+      isCreatingProjectRef.current = false;
       return;
     }
 
@@ -1069,13 +1093,17 @@ function WorkspacePage() {
       .from('project_members')
       .upsert({ project_id: proj.id, user_id: me.id, role: 'admin' }, { onConflict: 'project_id,user_id' });
 
-    setProjects((prev) => [...prev, proj]);
+    setProjects((prev) => {
+      if (prev.find(p => p.id === proj.id)) return prev;
+      return [...prev, proj];
+    });
     setNewProjectName('');
     setNewProjectDesc('');
     setNewProjectColor('#E01E5A');
     setNewProjectIsPrivate(false);
     setShowCreateProject(false);
     setCreatingProject(false);
+    isCreatingProjectRef.current = false;
     showToast(`Project "${proj.name}" created!`, 'success');
     await openProject(proj);
   };
@@ -1968,6 +1996,15 @@ function WorkspacePage() {
               if (prev.find(m => m.id === msg.id)) return prev;
               return [...prev, { ...msg, sender }];
             });
+
+            // Update sidebar last-message preview for this channel
+            setChannelLastMsg(prev => ({
+              ...prev,
+              [msg.channel_id]: {
+                senderName: sender?.full_name?.split(' ')[0] ?? 'Someone',
+                text: (msg.content ?? '').replace(/<[^>]*>/g, '').slice(0, 50),
+              }
+            }));
           }
 
           if (payload.eventType === "UPDATE") {
@@ -2004,6 +2041,11 @@ function WorkspacePage() {
         payload => {
           const msg = payload.new as DM;
           if (msg.workspace_id !== workspaceId) return; // ✅ ignore DMs from other workspaces
+
+          // Update sidebar last-message preview
+          const text = (msg.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+          setDmLastMsg(prev => ({ ...prev, [msg.sender_id]: { senderId: msg.sender_id, text } }));
+
           // If user is already looking at this DM conversation, don't badge
           if (msg.sender_id === currentUserId) return; // never badge own messages
           if (msg.sender_id === activeDmUserIdRef.current) return; // already viewing
@@ -2205,9 +2247,46 @@ function WorkspacePage() {
       mems.map(async (m: any) => {
         const { data: p } = await supabase
           .from("users").select("*").eq("id", m.user_id).single();
+
+        // Fetch last DM preview
+        if (meIdRef.current) {
+          const { data: lastMsg } = await supabase
+            .from("direct_messages")
+            .select("content, sender_id")
+            .or(`and(sender_id.eq.${meIdRef.current},receiver_id.eq.${m.user_id}),and(sender_id.eq.${m.user_id},receiver_id.eq.${meIdRef.current})`)
+            .eq("workspace_id", workspaceId)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (lastMsg) {
+            const text = (lastMsg.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+            setDmLastMsg(prev => ({ ...prev, [m.user_id]: { senderId: lastMsg.sender_id, text } }));
+          }
+        }
+
         return { ...m, profile: p };
       })
     );
+
+    // Also fetch last message for Self-DM (Notes)
+    if (meIdRef.current) {
+      const { data: lastNote } = await supabase
+        .from("direct_messages")
+        .select("content, sender_id")
+        .eq("sender_id", meIdRef.current)
+        .eq("receiver_id", meIdRef.current)
+        .eq("workspace_id", workspaceId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (lastNote) {
+        const text = (lastNote.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+        setDmLastMsg(prev => ({ ...prev, [meIdRef.current!]: { senderId: lastNote.sender_id, text } }));
+      }
+    }
+
     setMembers(profiles);
   };
 
@@ -2411,6 +2490,11 @@ function WorkspacePage() {
         const withoutDupe = prev.filter(m => m.id !== sent.id);
         return withoutDupe.map(m => m.id === optimisticMsg.id ? sent : m);
       });
+
+      // Update sidebar last-message preview
+      const targetId = sent.receiver_id;
+      const text = (sent.content ?? "").replace(/<[^>]*>/g, "").slice(0, 50);
+      setDmLastMsg(prev => ({ ...prev, [targetId]: { senderId: sent.sender_id, text } }));
     }
 
     setDmSending(false);
@@ -2555,6 +2639,22 @@ function WorkspacePage() {
             .eq("is_system", false)
             .gt("created_at", lastRead);
           counts[ch.id] = count || 0;
+        }
+
+        // last message preview
+        const { data: lastMsgRow } = await supabase
+          .from('messages')
+          .select('content, sender_id, sender:users(full_name)')
+          .eq('channel_id', ch.id)
+          .eq('is_system', false)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+        if (lastMsgRow) {
+          const sender = (lastMsgRow as any).sender;
+          const senderName = sender?.full_name?.split(' ')[0] ?? 'Someone';
+          const text = (lastMsgRow.content ?? '').replace(/<[^>]*>/g, '').slice(0, 50);
+          setChannelLastMsg(prev => ({ ...prev, [ch.id]: { senderName, text } }));
         }
       })
     );
@@ -2792,6 +2892,7 @@ function WorkspacePage() {
 
   const doCreateChannel = async (creatorId: string) => {
     setCreatingChannel(true);
+    isCreatingChannelRef.current = true;
     const { data: chan, error } = await supabase
       .from("channels")
       .insert({
@@ -2805,7 +2906,11 @@ function WorkspacePage() {
       .select()
       .single();
 
-    if (error) { setCreatingChannel(false); return; }
+    if (error) {
+      setCreatingChannel(false);
+      isCreatingChannelRef.current = false;
+      return;
+    }
 
     if (chan) {
       if (!newChannelPrivate) {
@@ -2833,17 +2938,21 @@ function WorkspacePage() {
         is_system: true,
       });
 
-      setChannels(prev => [...prev, chan]);
+      setChannels(prev => {
+        if (prev.find(c => c.id === chan.id)) return prev;
+        return [...prev, chan];
+      });
       await switchChannel(chan);
     }
     setCreatingChannel(false);
+    isCreatingChannelRef.current = false;
     setShowCreateChannel(false);
     setNewChannelName(""); setNewChannelDesc(""); setNewChannelPrivate(false);
   };
 
   // ─── Create channel ───────────────────────────────────────
   const createChannel = async () => {
-    if (!newChannelName.trim() || creatingChannel || !me || !workspace) return;
+    if (!newChannelName.trim() || creatingChannel || isCreatingChannelRef.current || !me || !workspace) return;
     await doCreateChannel(me.id);
   };
 
@@ -4044,26 +4153,87 @@ function WorkspacePage() {
                     const unread = unreadCounts[ch.id] ?? 0;
                     const mentions = mentionCounts[ch.id] ?? 0;
                     return (
-                      <button key={ch.id} onClick={() => switchChannel(ch)}
-                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer', backgroundColor: isActive ? 'var(--bg-active)' : 'transparent', color: isActive ? 'var(--text-primary)' : unread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)', textAlign: 'left', transition: 'background 0.12s', marginBottom: 1 }}
-                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
-                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'transparent' }}>
-                        <div style={{ color: isActive ? '#E01E5A' : ch.is_private ? 'var(--icon-color)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-                          <ChannelIcon channel={ch} size={14} />
+                      <button
+                        key={ch.id}
+                        onClick={() => switchChannel(ch)}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          padding: '7px 10px',
+                          borderRadius: 8,
+                          border: 'none',
+                          cursor: 'pointer',
+                          backgroundColor: isActive ? 'var(--bg-active)' : 'transparent',
+                          color: isActive ? 'var(--text-primary)' : unread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          textAlign: 'left',
+                          transition: 'background 0.12s',
+                          marginBottom: 2,
+                        }}
+                        onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'var(--bg-hover)'; }}
+                        onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent'; }}
+                      >
+                        {/* Icon */}
+                        <div style={{
+                          width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+                          backgroundColor: isActive ? 'var(--bg-hover)' : 'var(--bg-secondary)',
+                          border: '1px solid var(--border-color)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          color: isActive ? '#E01E5A' : ch.is_private ? 'var(--icon-color)' : 'var(--text-muted)',
+                        }}>
+                          <ChannelIcon channel={ch} size={15} />
                         </div>
-                        <span style={{ flex: 1, fontSize: '0.875rem', fontWeight: unread > 0 ? 700 : isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {ch.name}
-                        </span>
-                        {mentions > 0 && (
-                          <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
-                            {mentions}
-                          </span>
-                        )}
-                        {unread > 0 && mentions === 0 && (
-                          <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
-                            {unread}
-                          </span>
-                        )}
+
+                        {/* Name + preview */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: '0.875rem',
+                            fontWeight: unread > 0 ? 700 : isActive ? 600 : 500,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            color: 'var(--text-primary)',
+                            lineHeight: 1.3,
+                          }}>
+                            {ch.name}
+                          </div>
+                          <div style={{
+                            fontSize: '0.75rem',
+                            color: unread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            fontWeight: unread > 0 ? 600 : 400,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            lineHeight: 1.35,
+                            marginTop: 1,
+                          }}>
+                            {channelLastMsg[ch.id]
+                              ? <>{channelLastMsg[ch.id].senderName}: {channelLastMsg[ch.id].text}</>
+                              : <span style={{ fontStyle: 'italic', color: 'var(--text-muted)' }}>No messages yet</span>
+                            }
+                          </div>
+                        </div>
+
+                        {/* Badges */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
+                          {mentions > 0 && (
+                            <span style={{
+                              backgroundColor: '#E01E5A', color: '#fff',
+                              fontSize: '0.62rem', fontWeight: 700,
+                              borderRadius: 999, padding: '1px 5px',
+                              minWidth: 16, textAlign: 'center',
+                            }}>
+                              {mentions}
+                            </span>
+                          )}
+                          {unread > 0 && mentions === 0 && (
+                            <span style={{
+                              backgroundColor: '#E01E5A', color: '#fff',
+                              fontSize: '0.62rem', fontWeight: 700,
+                              borderRadius: 999, padding: '1px 5px',
+                              minWidth: 16, textAlign: 'center',
+                            }}>
+                              {unread}
+                            </span>
+                          )}
+                        </div>
                       </button>
                     );
                   })}
@@ -4122,37 +4292,36 @@ function WorkspacePage() {
                     <button
                       onClick={() => openDm(me.id, me)}
                       style={{
-                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer',
-                        backgroundColor: (view === 'dm' && activeDmUserId === me.id) ? 'var(--bg-active)' : 'transparent',
-                        color: (view === 'dm' && activeDmUserId === me.id) ? 'var(--text-primary)' : (dmUnreadCounts[me.id] ?? 0) > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
-                        textAlign: 'left', transition: 'background 0.12s', marginBottom: 1
+                        width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '7px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                        backgroundColor: view === 'dm' && activeDmUserId === me.id ? 'var(--bg-active)' : 'transparent',
+                        textAlign: 'left', transition: 'background 0.12s', marginBottom: 2,
                       }}
-                      onMouseEnter={e => { if (!(view === 'dm' && activeDmUserId === me.id)) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
-                      onMouseLeave={e => { if (!(view === 'dm' && activeDmUserId === me.id)) e.currentTarget.style.backgroundColor = 'transparent' }}
+                      onMouseEnter={e => { if (!(view === 'dm' && activeDmUserId === me.id)) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'var(--bg-hover)'; }}
+                      onMouseLeave={e => { if (!(view === 'dm' && activeDmUserId === me.id)) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent'; }}
                     >
                       <div style={{ position: 'relative', flexShrink: 0 }}>
-                        <Avatar profile={me} size={22} />
+                        <Avatar profile={me} size={36} />
                         <div style={{ position: 'absolute', bottom: -1, right: -1 }}>
-                          <PresenceDot userId={me.id} size={8} borderColor="var(--bg-primary)" />
+                          <PresenceDot userId={me.id} size={10} borderColor="var(--bg-primary)" />
                         </div>
                       </div>
-                      <span style={{
-                        flex: 1, fontSize: '0.875rem',
-                        fontWeight: (dmUnreadCounts[me.id] ?? 0) > 0 ? 700 : (view === 'dm' && activeDmUserId === me.id) ? 600 : 400,
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
-                      }}>
-                        {me.full_name} <span style={{ fontSize: '0.7rem', color: 'var(--text-faint)' }}>(you)</span>
-                      </span>
-                      {(dmUnreadCounts[me.id] ?? 0) > 0 && (
-                        <span style={{
-                          backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem',
-                          fontWeight: 700, borderRadius: '999px', padding: '1px 5px',
-                          minWidth: 16, textAlign: 'center', flexShrink: 0
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{
+                          fontSize: '0.875rem', fontWeight: 500,
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          color: 'var(--text-primary)', lineHeight: 1.3,
                         }}>
-                          {dmUnreadCounts[me.id]}
-                        </span>
-                      )}
+                          {me?.full_name} <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 400 }}>(you)</span>
+                        </div>
+                        <div style={{
+                          fontSize: '0.75rem', color: 'var(--text-secondary)', fontStyle: 'italic',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          lineHeight: 1.35, marginTop: 1,
+                        }}>
+                          {dmLastMsg[me.id] ? dmLastMsg[me.id].text : 'Notes & reminders'}
+                        </div>
+                      </div>
                     </button>
                   )}
 
@@ -4161,21 +4330,61 @@ function WorkspacePage() {
                     const isActive = view === 'dm' && activeDmUserId === m.user_id;
                     const dmUnread = dmUnreadCounts[m.user_id] ?? 0;
                     return (
-                      <button key={m.user_id} onClick={() => openDm(m.user_id, m.profile)}
-                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer', backgroundColor: isActive ? 'var(--bg-active)' : 'transparent', color: isActive ? 'var(--text-primary)' : dmUnread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)', textAlign: 'left', transition: 'background 0.12s', marginBottom: 1 }}
-                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
-                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.backgroundColor = 'transparent' }}>
+                      <button
+                        key={m.user_id}
+                        onClick={() => openDm(m.user_id, m.profile)}
+                        style={{
+                          width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                          padding: '7px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                          backgroundColor: isActive ? 'var(--bg-active)' : 'transparent',
+                          color: isActive ? 'var(--text-primary)' : dmUnread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          textAlign: 'left', transition: 'background 0.12s', marginBottom: 2,
+                        }}
+                        onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'var(--bg-hover)'; }}
+                        onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent'; }}
+                      >
+                        {/* Avatar with presence */}
                         <div style={{ position: 'relative', flexShrink: 0 }}>
-                          <Avatar profile={m.profile} size={22} />
+                          <Avatar profile={m.profile} size={36} />
                           <div style={{ position: 'absolute', bottom: -1, right: -1 }}>
-                            <PresenceDot userId={m.user_id} size={8} borderColor="var(--bg-primary)" />
+                            <PresenceDot userId={m.user_id} size={10} borderColor="var(--bg-primary)" />
                           </div>
                         </div>
-                        <span style={{ flex: 1, fontSize: '0.875rem', fontWeight: dmUnread > 0 ? 700 : isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {m.profile?.full_name}
-                        </span>
+
+                        {/* Name + last message preview */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: '0.875rem',
+                            fontWeight: dmUnread > 0 ? 700 : isActive ? 600 : 500,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            color: 'var(--text-primary)', lineHeight: 1.3,
+                          }}>
+                            {m.profile?.full_name}
+                          </div>
+                          <div style={{
+                            fontSize: '0.75rem',
+                            color: dmUnread > 0 ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            fontWeight: dmUnread > 0 ? 600 : 400,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            lineHeight: 1.35, marginTop: 1,
+                          }}>
+                            {dmLastMsg[m.user_id]
+                              ? `${dmLastMsg[m.user_id].senderId === me?.id ? 'You' : m.profile?.full_name?.split(' ')[0] ?? ''}: ${dmLastMsg[m.user_id].text}`
+                              : <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                                {onlineUsers.has(m.user_id) ? 'Online' : 'Say hello!'}
+                              </span>
+                            }
+                          </div>
+                        </div>
+
+                        {/* Unread badge */}
                         {dmUnread > 0 && (
-                          <span style={{ backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700, borderRadius: '999px', padding: '1px 5px', minWidth: 16, textAlign: 'center', flexShrink: 0 }}>
+                          <span style={{
+                            backgroundColor: '#E01E5A', color: '#fff',
+                            fontSize: '0.62rem', fontWeight: 700,
+                            borderRadius: 999, padding: '1px 5px',
+                            minWidth: 16, textAlign: 'center', flexShrink: 0,
+                          }}>
                             {dmUnread}
                           </span>
                         )}
@@ -4296,35 +4505,43 @@ function WorkspacePage() {
                   ) : (
                     // Show recent projects (max 10) in sidebar
                     projects
-                      .filter(p => recentProjectIds.includes(p.id))
-                      .sort((a, b) => recentProjectIds.indexOf(a.id) - recentProjectIds.indexOf(b.id))
+                      .filter(p =>
+                        recentProjectIds.includes(p.id) ||          // previously visited
+                        (projectChatUnread[p.id] ?? 0) > 0          // OR has unread messages
+                      )
+                      .sort((a, b) => {
+                        // unread projects float to top, then sort by recency
+                        const aUnread = (projectChatUnread[a.id] ?? 0) > 0 && !recentProjectIds.includes(a.id) ? -1 : 0;
+                        const bUnread = (projectChatUnread[b.id] ?? 0) > 0 && !recentProjectIds.includes(b.id) ? -1 : 0;
+                        if (aUnread !== bUnread) return aUnread - bUnread;
+                        return recentProjectIds.indexOf(a.id) - recentProjectIds.indexOf(b.id);
+                      })
                       .map(proj => {
                         const isActive = view === 'project' && activeProject?.id === proj.id;
                         return (
-                          <button key={proj.id} onClick={() => openProject(proj)}
+                          <button
+                            key={proj.id}
+                            onClick={() => openProject(proj)}
                             style={{
-                              width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "5px 12px", border: "none",
-                              background: isActive ? "var(--bg-active)" : "transparent",
-                              color: isActive ? "var(--text-primary)" : "var(--text-muted)",
-                              textAlign: "left", cursor: "pointer", borderRadius: 6, fontSize: "0.85rem", fontWeight: 500, transition: "all 0.1s"
+                              width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                              padding: '5px 12px', border: 'none',
+                              background: isActive ? 'var(--bg-active)' : 'transparent',
+                              color: isActive ? 'var(--text-primary)' : 'var(--text-muted)',
+                              textAlign: 'left', cursor: 'pointer', borderRadius: 6,
+                              fontSize: '0.85rem', fontWeight: 500, transition: 'all 0.1s',
                             }}
-                            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                            onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-hover)'; }}
+                            onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
                           >
-                            <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: proj.color, flexShrink: 0 }} />
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{proj.name}</span>
+                            <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: proj.color, flexShrink: 0 }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                              {proj.name}
+                            </span>
                             {(projectChatUnread[proj.id] ?? 0) > 0 && (
                               <span style={{
-                                backgroundColor: '#E01E5A',
-                                color: '#fff',
-                                fontSize: '0.65rem',
-                                fontWeight: 700,
-                                borderRadius: 999,
-                                padding: '1px 5px',
-                                minWidth: 16,
-                                textAlign: 'center',
-                                flexShrink: 0,
-                                marginLeft: 'auto',
+                                backgroundColor: '#E01E5A', color: '#fff', fontSize: '0.65rem', fontWeight: 700,
+                                borderRadius: 999, padding: '1px 5px', minWidth: 16, textAlign: 'center',
+                                flexShrink: 0, marginLeft: 'auto',
                               }}>
                                 {projectChatUnread[proj.id]}
                               </span>
@@ -4332,27 +4549,6 @@ function WorkspacePage() {
                           </button>
                         );
                       })
-                  )}
-                  {/* If no recent projects but some projects exist, show first few */}
-                  {projects.length > 0 && projects.filter(p => recentProjectIds.includes(p.id)).length === 0 && (
-                    projects.slice(0, 5).map(proj => {
-                      const isActive = view === 'project' && activeProject?.id === proj.id;
-                      return (
-                        <button key={proj.id} onClick={() => openProject(proj)}
-                          style={{
-                            width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "5px 12px", border: "none",
-                            background: isActive ? "var(--bg-active)" : "transparent",
-                            color: isActive ? "var(--text-primary)" : "var(--text-muted)",
-                            textAlign: "left", cursor: "pointer", borderRadius: 6, fontSize: "0.85rem", fontWeight: 500, transition: "all 0.1s"
-                          }}
-                          onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
-                        >
-                          <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: proj.color, flexShrink: 0 }} />
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{proj.name}</span>
-                        </button>
-                      );
-                    })
                   )}
                 </div>
               )}
@@ -4410,6 +4606,42 @@ function WorkspacePage() {
                 {activeChannel.name}
               </span>
               <div style={{ flex: 1 }} />
+
+              {/* ── MEMBER AVATAR STACK ── */}
+              <button
+                onClick={() => {
+                  setEditChannelName(activeChannel.name);
+                  setEditChannelDesc(activeChannel.description ?? "");
+                  setEditChannelPrivate(activeChannel.is_private);
+                  setChannelSettingsTab("members");       // ← land directly on Members tab
+                  setShowChannelSettings(true);
+                  if (channelMembers.length === 0) loadChannelMembers();
+                }}
+                title={`${channelMembers.length} member${channelMembers.length !== 1 ? "s" : ""} — manage`}
+                style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", padding: "4px 6px", borderRadius: 8, transition: "background 0.15s" }}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              >
+                <div style={{ display: "flex", alignItems: "center" }}>
+                  {channelMembers.slice(0, 5).map((m, i) => (
+                    <div key={m.user_id} style={{ marginLeft: i === 0 ? 0 : -8, zIndex: 5 - i, position: "relative", borderRadius: "50%", border: "2px solid var(--bg-topbar)" }}>
+                      {m.profile?.avatar_url
+                        ? <img src={m.profile.avatar_url} alt={m.profile?.full_name ?? ""} style={{ width: 24, height: 24, borderRadius: "50%", objectFit: "cover", display: "block" }} />
+                        : <div style={{ width: 24, height: 24, borderRadius: "50%", backgroundColor: "#E01E5A", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.6rem", fontWeight: 700, color: "#fff" }}>
+                          {m.profile?.full_name?.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2) ?? "?"}
+                        </div>
+                      }
+                    </div>
+                  ))}
+                  {channelMembers.length > 5 && (
+                    <div style={{ marginLeft: -8, zIndex: 0, width: 24, height: 24, borderRadius: "50%", backgroundColor: "var(--bg-active)", border: "2px solid var(--bg-topbar)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.6rem", fontWeight: 700, color: "var(--text-muted)" }}>
+                      +{channelMembers.length - 5}
+                    </div>
+                  )}
+                </div>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 500 }}>{channelMembers.length}</span>
+              </button>
+              {/* ── END MEMBER AVATAR STACK ── */}
 
               {/* Pinned messages toggle */}
               {pinnedMessages.length > 0 && (
@@ -4589,17 +4821,23 @@ function WorkspacePage() {
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
                         {channelMembers.map(m => (
                           <div key={m.user_id} onClick={() => setShowMemberProfile(m)}
-                            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "12px 14px", borderRadius: 12, cursor: "pointer", backgroundColor: "var(--bg-hover)", border: "1px solid var(--border-color)", minWidth: 80, transition: "all 0.15s" }}
+                            style={{
+                              display: "flex", flexDirection: "column", alignItems: "center",
+                              gap: 8, padding: "16px 18px", borderRadius: 14,
+                              cursor: "pointer", backgroundColor: "var(--bg-hover)",
+                              border: "1px solid var(--border-color)", minWidth: 96,
+                              transition: "all 0.15s",
+                            }}
                             onMouseEnter={e => { e.currentTarget.style.backgroundColor = "var(--bg-active)"; e.currentTarget.style.borderColor = "var(--border-strong)"; }}
                             onMouseLeave={e => { e.currentTarget.style.backgroundColor = "var(--bg-hover)"; e.currentTarget.style.borderColor = "var(--border-color)"; }}
                           >
                             <div style={{ position: "relative" }}>
-                              <Avatar profile={m.profile} size={40} />
-                              <div style={{ position: "absolute", bottom: 1, right: 1 }}>
-                                <PresenceDot userId={m.user_id} size={10} borderColor="var(--bg-hover)" />
+                              <Avatar profile={m.profile} size={48} />
+                              <div style={{ position: "absolute", bottom: 0, right: 0 }}>
+                                <PresenceDot userId={m.user_id} size={11} borderColor="var(--bg-secondary)" />
                               </div>
                             </div>
-                            <span style={{ fontSize: "0.78rem", fontWeight: 500, textAlign: "center", color: "var(--text-primary)" }}>
+                            <span style={{ fontSize: "0.8rem", fontWeight: 600, textAlign: "center", color: "var(--text-primary)", maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               {m.profile?.full_name?.split(" ")[0]}
                             </span>
                             {(() => {
@@ -5315,6 +5553,34 @@ function WorkspacePage() {
                     <Plus size={15} /> New Project
                   </button>
                 )}
+
+                {/* Theme picker (All Projects) */}
+                <div ref={themePickerRef} style={{ position: "relative" }}>
+                  <button
+                    onClick={() => setShowThemePicker(p => !p)}
+                    title="Switch theme"
+                    style={{ background: showThemePicker ? "var(--bg-hover)" : "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "7px", borderRadius: 8, display: "flex", alignItems: "center", transition: "all 0.15s" }}
+                    onMouseEnter={e => { e.currentTarget.style.color = "var(--icon-hover)"; e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+                    onMouseLeave={e => { if (!showThemePicker) { e.currentTarget.style.color = "var(--icon-color)"; e.currentTarget.style.backgroundColor = "transparent"; } }}
+                  >
+                    {themeMode === "light" ? <Sun size={17} /> : themeMode === "dark" ? <Moon size={17} /> : <Monitor size={17} />}
+                  </button>
+                  {showThemePicker && (
+                    <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 10, padding: 4, boxShadow: "0 8px 24px var(--shadow-color)", zIndex: 100, minWidth: 150, animation: "fadeSlideDown 0.15s ease" }}>
+                      {(["system", "light", "dark"] as ThemeMode[]).map(mode => (
+                        <button key={mode} onClick={() => handleThemeChange(mode)}
+                          style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", border: "none", cursor: "pointer", borderRadius: 7, fontSize: "0.85rem", fontWeight: themeMode === mode ? 600 : 400, backgroundColor: themeMode === mode ? "rgba(224,30,90,0.1)" : "transparent", color: themeMode === mode ? "#E01E5A" : "var(--text-primary)", transition: "all 0.12s" }}
+                          onMouseEnter={e => { if (themeMode !== mode) e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+                          onMouseLeave={e => { if (themeMode !== mode) e.currentTarget.style.backgroundColor = "transparent"; }}
+                        >
+                          {mode === "light" ? <Sun size={14} /> : mode === "dark" ? <Moon size={14} /> : <Monitor size={14} />}
+                          <span style={{ textTransform: "capitalize" }}>{mode}</span>
+                          {themeMode === mode && <Check size={13} color="#E01E5A" style={{ marginLeft: "auto" }} />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Tabs — same style as Overview/Discussions */}
@@ -5505,19 +5771,40 @@ function WorkspacePage() {
                   </span>
                 )}
                 <div style={{ flex: 1 }} />
+
                 {/* Stacked member avatars */}
-                <div style={{ display: 'flex', alignItems: 'center' }}>
-                  {projectMembers.slice(0, 5).map((pm, i) => (
-                    <div key={pm.id} style={{ marginLeft: i === 0 ? 0 : -8, zIndex: 5 - i }}>
-                      <Avatar profile={pm.profile} size={26} />
-                    </div>
-                  ))}
-                  {projectMembers.length > 5 && (
-                    <div style={{ marginLeft: -8, width: 26, height: 26, borderRadius: '50%', backgroundColor: 'var(--bg-tertiary)', border: '2px solid var(--bg-topbar)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem', fontWeight: 700, color: 'var(--text-muted)' }}>
-                      +{projectMembers.length - 5}
-                    </div>
-                  )}
-                </div>
+                <button
+                  onClick={() => {
+                    setEditProjectName(activeProject.name);
+                    setEditProjectDesc(activeProject.description ?? "");
+                    setEditProjectColor(activeProject.color);
+                    setProjectSettingsTab("members");    // ← land directly on Members tab
+                    setShowProjectSettings(true);
+                  }}
+                  title={`${projectMembers.length} member${projectMembers.length !== 1 ? "s" : ""} — manage`}
+                  style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", padding: "4px 6px", borderRadius: 8, transition: "background 0.15s" }}
+                  onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-hover)")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                >
+                  <div style={{ display: "flex", alignItems: "center" }}>
+                    {projectMembers.slice(0, 5).map((pm, i) => (
+                      <div key={pm.user_id} style={{ marginLeft: i === 0 ? 0 : -8, zIndex: 5 - i, position: "relative", borderRadius: "50%", border: "2px solid var(--bg-topbar)" }}>
+                        {pm.profile?.avatar_url
+                          ? <img src={pm.profile.avatar_url} alt={pm.profile?.full_name ?? ""} style={{ width: 24, height: 24, borderRadius: "50%", objectFit: "cover", display: "block" }} />
+                          : <div style={{ width: 24, height: 24, borderRadius: "50%", backgroundColor: activeProject.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.6rem", fontWeight: 700, color: "#fff" }}>
+                            {pm.profile?.full_name?.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2) ?? "?"}
+                          </div>
+                        }
+                      </div>
+                    ))}
+                    {projectMembers.length > 5 && (
+                      <div style={{ marginLeft: -8, zIndex: 0, width: 24, height: 24, borderRadius: "50%", backgroundColor: "var(--bg-active)", border: "2px solid var(--bg-topbar)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.6rem", fontWeight: 700, color: "var(--text-muted)" }}>
+                        +{projectMembers.length - 5}
+                      </div>
+                    )}
+                  </div>
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 500 }}>{projectMembers.length}</span>
+                </button>
                 {/* Settings */}
                 {isAdmin && (
                   <button
@@ -5528,6 +5815,34 @@ function WorkspacePage() {
                     <Settings size={17} />
                   </button>
                 )}
+
+                {/* Theme picker (Individual Project) */}
+                <div ref={themePickerRef} style={{ position: "relative" }}>
+                  <button
+                    onClick={() => setShowThemePicker(p => !p)}
+                    title="Switch theme"
+                    style={{ background: showThemePicker ? "var(--bg-hover)" : "none", border: "none", cursor: "pointer", color: "var(--icon-color)", padding: "7px", borderRadius: 8, display: "flex", alignItems: "center", transition: "all 0.15s" }}
+                    onMouseEnter={e => { e.currentTarget.style.color = "var(--icon-hover)"; e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+                    onMouseLeave={e => { if (!showThemePicker) { e.currentTarget.style.color = "var(--icon-color)"; e.currentTarget.style.backgroundColor = "transparent"; } }}
+                  >
+                    {themeMode === "light" ? <Sun size={17} /> : themeMode === "dark" ? <Moon size={17} /> : <Monitor size={17} />}
+                  </button>
+                  {showThemePicker && (
+                    <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-color)", borderRadius: 10, padding: 4, boxShadow: "0 8px 24px var(--shadow-color)", zIndex: 100, minWidth: 150, animation: "fadeSlideDown 0.15s ease" }}>
+                      {(["system", "light", "dark"] as ThemeMode[]).map(mode => (
+                        <button key={mode} onClick={() => handleThemeChange(mode)}
+                          style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", border: "none", cursor: "pointer", borderRadius: 7, fontSize: "0.85rem", fontWeight: themeMode === mode ? 600 : 400, backgroundColor: themeMode === mode ? "rgba(224,30,90,0.1)" : "transparent", color: themeMode === mode ? "#E01E5A" : "var(--text-primary)", transition: "all 0.12s" }}
+                          onMouseEnter={e => { if (themeMode !== mode) e.currentTarget.style.backgroundColor = "var(--bg-hover)"; }}
+                          onMouseLeave={e => { if (themeMode !== mode) e.currentTarget.style.backgroundColor = "transparent"; }}
+                        >
+                          {mode === "light" ? <Sun size={14} /> : mode === "dark" ? <Moon size={14} /> : <Monitor size={14} />}
+                          <span style={{ textTransform: "capitalize" }}>{mode}</span>
+                          {themeMode === mode && <Check size={13} color="#E01E5A" style={{ marginLeft: "auto" }} />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* ── Tab Bar ── */}
@@ -5929,6 +6244,7 @@ function WorkspacePage() {
                               </div>
                             )}
                             <div
+                              id={`msg-${msg.id}`}
                               onMouseEnter={() => setProjectHoveredId(msg.id)}
                               onMouseLeave={() => { setProjectHoveredId(null); if (projectOpenMenuId === msg.id) setProjectOpenMenuId(null) }}
                               style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: isGrouped ? '1px 8px 1px 52px' : '6px 8px', borderRadius: 8, backgroundColor: projectHoveredId === msg.id ? 'var(--bg-message-hover)' : 'transparent', position: 'relative', transition: 'background 0.1s' }}>
@@ -5944,7 +6260,7 @@ function WorkspacePage() {
                                 {/* Header */}
                                 {!isGrouped && (
                                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 3 }}>
-                                    <span style={{ fontSize: '0.88rem', fontWeight: 700, color: isMe ? '#E01E5A' : 'var(--text-primary)' }}>
+                                    <span style={{ fontSize: '0.88rem', fontWeight: 700, color: isMe ? '#E01E5A' : 'var(--text-secondary)' }}>
                                       {msg.sender?.full_name}
                                     </span>
                                     <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
@@ -5974,7 +6290,22 @@ function WorkspacePage() {
                                     </div>
                                   </div>
                                 ) : (
-                                  <div style={{ fontSize: '0.88rem', color: 'var(--text-primary)', lineHeight: 1.6, wordBreak: 'break-word' }} dangerouslySetInnerHTML={{ __html: msg.content }} />
+                                  <>
+                                    {/* Reply quote block */}
+                                    {msg.parent_snapshot && (
+                                      <QuotedBlock
+                                        snapshot={msg.parent_snapshot}
+                                        originalId={msg.parent_message_id}
+                                        onScrollTo={scrollToMessage}
+                                      />
+                                    )}
+
+                                    {/* Actual message */}
+                                    <div
+                                      style={{ fontSize: '0.88rem', color: 'var(--text-primary)', lineHeight: 1.6, wordBreak: 'break-word' }}
+                                      dangerouslySetInnerHTML={{ __html: msg.content }}
+                                    />
+                                  </>
                                 )}
 
                                 {/* Attachment */}
@@ -6771,11 +7102,11 @@ function WorkspacePage() {
                     </button>
                     {/* Danger zone */}
                     <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: 16, marginTop: 8 }}>
-                      <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "#E01E5A", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Danger Zone</div>
+                      <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "#E01E5A", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Delete Project</div>
                       {!showDeleteProjectConfirm ? (
                         <button onClick={() => setShowDeleteProjectConfirm(true)}
                           style={{ padding: "8px 18px", borderRadius: 8, border: "1px solid #E01E5A", background: "none", cursor: "pointer", color: "#E01E5A", fontSize: "0.85rem", fontWeight: 600 }}>
-                          Delete Project
+                          Delete
                         </button>
                       ) : (
                         <div style={{ backgroundColor: "rgba(224,30,90,0.08)", border: "1px solid rgba(224,30,90,0.25)", borderRadius: 10, padding: 14 }}>
@@ -7005,7 +7336,7 @@ function WorkspacePage() {
                         {/* Danger zone */}
                         {isAdmin && !isLobby && (
                           <div style={{ marginTop: 8, padding: "16px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.2)", backgroundColor: "rgba(248,113,113,0.04)" }}>
-                            <p style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f87171", marginBottom: 10 }}>Deleting this channel will removes all members and messages on it. Cant be restored again.</p>
+                            <p style={{ fontSize: "0.8rem", fontWeight: 600, color: "#f87171", marginBottom: 10 }}></p>
                             <button
                               onClick={() => setShowDeleteChannelConfirm(true)}
                               style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(248,113,113,0.3)", backgroundColor: "transparent", color: "#f87171", fontSize: "0.84rem", fontWeight: 500, cursor: "pointer", transition: "all 0.15s" }}
